@@ -1,0 +1,29 @@
+#!/system/bin/sh
+#
+# custom_mounts - Waydroid hook that applies the bind mounts listed in
+# ~/.local/share/waydroid/custom_mounts.txt
+#
+# Each line in custom_mounts.txt is:  <host_path> <container_path>
+#   e.g.  /home/mango/appletv-launcher /sdcard/Springboard
+#
+# NOTE: paths are resolved inside the container, where the host filesystem is
+# mounted at the same absolute path. '/sdcard' lives inside the Android image.
+set -eu
+
+MOUNT_FILE="$(find /home -maxdepth 4 -name 'custom_mounts.txt' -path '*/waydroid/*' 2>/dev/null | head -n 1)"
+[ -n "$MOUNT_FILE" ] || MOUNT_FILE="${HOME:-/root}/.local/share/waydroid/custom_mounts.txt"
+
+[ -r "$MOUNT_FILE" ] || exit 0
+
+while read -r host_path container_path; do
+  case "$host_path" in
+    '' | \#*) continue ;;
+  esac
+  if [ -d "$host_path" ] && [ -d "$container_path" ]; then
+    mount --bind "$host_path" "$container_path" 2>/dev/null \
+      && echo "bound $host_path -> $container_path" \
+      || echo "could not bind $host_path -> $container_path" >&2
+  fi
+done <"$MOUNT_FILE"
+
+exit 0

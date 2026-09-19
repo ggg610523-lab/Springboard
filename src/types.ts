@@ -20,6 +20,8 @@ export interface AppInfo {
   startupWmClass: string | null;
   noDisplay: boolean;
   group: string;
+  /** Android app running under Waydroid (e.g. Netflix, Disney+). */
+  isWaydroid: boolean;
 }
 
 export interface UsageEntry {

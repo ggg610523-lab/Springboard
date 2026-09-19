@@ -321,6 +321,7 @@ pub fn scan_apps() -> Vec<AppInfo> {
             let categories = entry.list("Categories");
             let group_name = categorize(&categories);
             let terminal = entry.bool("Terminal");
+            let is_waydroid = id.starts_with("waydroid");
             apps.push(AppInfo {
                 id,
                 name,
@@ -338,6 +339,7 @@ pub fn scan_apps() -> Vec<AppInfo> {
                 desktop_file: file.to_string_lossy().to_string(),
                 group: group_name,
                 exec,
+                is_waydroid,
             });
         }
     }

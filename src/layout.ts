@@ -135,39 +135,46 @@ function mediaShelves(tab: TabId, kindFilter: string[] | null): Shelf[] {
 function appShelves(limitCategories: number): Shelf[] {
   const { settings, apps, usage } = store.state;
   const list = visibleApps(apps, settings);
+  // Waydroid (Android) apps live on their own row, separate from Linux apps.
+  const android = list.filter((app) => app.isWaydroid);
+  const linux = list.filter((app) => !app.isWaydroid);
   const shelves: Shelf[] = [];
 
+  if (android.length) {
+    shelves.push(appShelf("android", "Android Apps", "Waydroid", sortByName(android)));
+  }
+
   const favorites = settings.favorites
-    .map((id) => list.find((app) => app.id === id))
+    .map((id) => linux.find((app) => app.id === id))
     .filter((app): app is AppInfo => Boolean(app));
   if (favorites.length) {
     shelves.push(appShelf("favorites", "Favorites", "Pinned", favorites));
   }
 
-  const recent = byUsage(list, "recent").filter((app) => (usage.apps[app.id]?.lastUsed ?? 0) > 0);
+  const recent = byUsage(linux, "recent").filter((app) => (usage.apps[app.id]?.lastUsed ?? 0) > 0);
   if (recent.length) {
     shelves.push(appShelf("recent", "Recently Used", "Up Next", recent.slice(0, settings.maxRecent)));
   }
 
-  const mostUsed = byUsage(list, "count").filter((app) => (usage.apps[app.id]?.count ?? 0) > 1);
+  const mostUsed = byUsage(linux, "count").filter((app) => (usage.apps[app.id]?.count ?? 0) > 1);
   if (mostUsed.length >= 3) {
     shelves.push(appShelf("most-used", "Most Used", "Smart", mostUsed.slice(0, settings.maxRecent)));
   }
 
   if (!settings.groupByCategory) {
-    shelves.push(appShelf("all", "All Apps", "Library", sortByName(list)));
+    shelves.push(appShelf("all", "All Apps", "Library", sortByName(linux)));
     return shelves;
   }
 
   for (const row of settings.rows.filter((entry) => entry.source === "manual")) {
     const custom = row.appIds
-      .map((id) => list.find((app) => app.id === id))
+      .map((id) => linux.find((app) => app.id === id))
       .filter((app): app is AppInfo => Boolean(app));
     if (custom.length) shelves.push(appShelf(`custom-${row.id}`, row.title, "Custom", custom));
   }
 
   const groups = new Map<string, AppInfo[]>();
-  for (const app of list) {
+  for (const app of linux) {
     const key = app.group || "Other";
     const bucket = groups.get(key);
     if (bucket) bucket.push(app);

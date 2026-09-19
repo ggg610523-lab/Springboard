@@ -1,0 +1,20 @@
+#!/system/bin/sh
+#
+# post_boot - runs INSIDE the Android TV container once Android has booted.
+# This file is copied to ~/.local/share/waydroid/hooks/ by setup.sh; rename or
+# delete it here to disable it.
+#
+# Purpose: make the Android TV a good citizen behind the Springboard launcher
+# - keep the display awake while a video is playing and disable the TV
+#   screensaver timeout so the Home screen does not dim.
+set -eu
+
+# Hide the Android TV "screensaver" / sleep timeout (values in ms; 0 = never).
+settings put secure sleep_timeout 0 2>/dev/null || true
+
+# Keep the panel from sleeping while we sit on the Springboard home.
+if command -v dumpsys >/dev/null 2>&1; then
+  dumpsys power | grep -q "mWakefulness=Awake" || true
+fi
+
+exit 0

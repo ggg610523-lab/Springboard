@@ -1,0 +1,8 @@
+# Waydroid custom bind mounts - one "<host_path> <container_path>" pair per line.
+# Applied by the `custom_mounts` hook in hooks/ on every container start.
+#
+# Lines starting with # are ignored. Host paths are resolved inside the
+# container where the host filesystem appears at the same absolute path.
+
+# Example: make the Springboard repo readable inside Android as /sdcard/Springboard
+# /home/mango/appletv-launcher /sdcard/Springboard

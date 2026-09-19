@@ -29,6 +29,9 @@ pub struct AppInfo {
     pub no_display: bool,
     /// Best guess for the row the app belongs to.
     pub group: String,
+    /// Android app running under Waydroid (e.g. Netflix, Disney+).
+    #[serde(default)]
+    pub is_waydroid: bool,
 }
 
 /// A user defined row on the home screen.

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Waydroid TV Session
+Comment=Boot the Android TV container and export its apps for Springboard
+Exec=/home/mango/appletv-launcher/waydroid/session-start.sh
+Icon=video-display
+Terminal=false
+X-GNOME-Autostart-enabled=true
+Categories=Utility;
