@@ -7,6 +7,8 @@ Springboard turns your desktop into a cinematic Apple TV home screen: it
 discovers the applications installed on your system, presents them as glowing
 tvOS-style tiles, and launches the real apps when you select them.
 
+![Home screen](screenshots/home-screen.png)
+
 ## Features
 
 - **App discovery** — scans installed `.desktop` files and displays them as
