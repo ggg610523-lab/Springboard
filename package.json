@@ -1,0 +1,23 @@
+{
+  "name": "appletv-launcher",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "An Apple TV (tvOS) style home screen launcher for the Linux desktop, built with Tauri.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "start": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "typescript": "5.9.3",
+    "vite": "7.3.6"
+  }
+}

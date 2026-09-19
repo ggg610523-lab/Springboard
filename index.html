@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Apple TV</title>
+    <style>
+      /* Startup splash: shown before the module script loads so there's no
+         white flash; the JS keeps it up while data is being preloaded. */
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        background: #000;
+        display: grid;
+        place-items: center;
+        opacity: 1;
+        transition: opacity 700ms ease;
+      }
+      #splash.is-hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #splash-art {
+        width: 100px;
+        height: 100px;
+        object-fit: contain;
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="splash" aria-hidden="true">
+      <img id="splash-art" src="/startup.png" alt="" draggable="false" />
+    </div>
+
+    <!-- Backdrop stack: wallpaper layer + dynamic colour wash + vignette -->
+    <div id="backdrop" aria-hidden="true">
+      <div id="backdrop-image"></div>
+      <div id="backdrop-wash"></div>
+      <div id="backdrop-vignette"></div>
+    </div>
+
+    <!-- Root of the tvOS home screen -->
+    <div id="screen" role="application" aria-label="Apple TV home screen">
+      <header id="topbar"></header>
+      <main id="stage">
+        <section id="top-shelf" aria-label="Top Shelf"></section>
+        <section id="rows" aria-label="Applications"></section>
+      </main>
+      <footer id="hints"></footer>
+    </div>
+
+    <!-- Overlay layer: search, settings, context menu, dialogs, toasts -->
+    <div id="overlays"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

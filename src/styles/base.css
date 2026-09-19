@@ -1,0 +1,221 @@
+/* ── Base + screen chrome ─────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+
+body {
+  font-family: var(--font-ui);
+  color: var(--label-primary);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  cursor: default;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* ── Backdrop stack ──────────────────────────────────────────────────────── */
+#backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: #05050a;
+}
+
+#backdrop-image,
+#backdrop-wash,
+#backdrop-vignette {
+  position: absolute;
+  inset: -8%;
+}
+
+#backdrop-image {
+  inset: -12%;
+  background-position: center;
+  background-size: cover;
+  filter: blur(var(--backdrop-blur)) saturate(135%);
+  opacity: 0;
+  transform: scale(1.08);
+  transition: opacity 900ms var(--tv-ease), background-image 400ms linear;
+}
+
+#backdrop-image.is-visible {
+  opacity: 0.5;
+}
+
+#backdrop-wash {
+  background:
+    radial-gradient(120% 90% at 22% 8%, var(--wash-a, #1b2a4a) 0%, transparent 62%),
+    radial-gradient(120% 100% at 88% 96%, var(--wash-b, #2a1636) 0%, transparent 58%);
+  opacity: 0.9;
+  transition: background 900ms var(--tv-ease);
+}
+
+#backdrop-vignette {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, calc(var(--backdrop-dim) + 0.12)) 0%, rgba(0, 0, 0, 0) 34%),
+    linear-gradient(0deg, rgba(0, 0, 0, calc(var(--backdrop-dim) + 0.2)) 0%, rgba(0, 0, 0, 0) 52%),
+    radial-gradient(130% 110% at 50% 42%, rgba(0, 0, 0, 0) 34%, rgba(0, 0, 0, var(--backdrop-dim)) 100%);
+}
+
+/* ── Screen grid ─────────────────────────────────────────────────────────── */
+#screen {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100vh;
+  padding-bottom: 6px;
+}
+
+#stage {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding-bottom: 18px;
+}
+
+/* ── Top bar ─────────────────────────────────────────────────────────────── */
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  height: var(--topbar-height);
+  padding: 14px var(--shelf-padding) 0;
+}
+
+.tv-wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--label-primary);
+}
+
+.tv-wordmark .tv-mark {
+  font-size: 27px;
+  font-weight: 800;
+  letter-spacing: -2.5px;
+}
+
+.tv-wordmark .tv-sub {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: var(--label-tertiary);
+}
+
+.topbar-spacer {
+  flex: 1;
+}
+
+.topbar-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  font-size: 15.5px;
+  font-weight: 500;
+  color: var(--label-secondary);
+  transition: transform var(--tv-dur) var(--tv-ease),
+    background var(--tv-dur-fast) linear, color var(--tv-dur-fast) linear;
+}
+
+.topbar-item:hover {
+  color: var(--label-primary);
+}
+
+.topbar-item.is-active {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--label-primary);
+  font-weight: 600;
+}
+
+.topbar-item.is-focused {
+  background: #fff;
+  color: #111;
+  transform: scale(1.06);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.topbar-item svg {
+  width: 17px;
+  height: 17px;
+}
+
+.topbar-clock {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--label-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 84px;
+  text-align: right;
+}
+
+/* ── Bottom hint bar (Apple TV remote hints) ─────────────────────────────── */
+#hints {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding: 8px var(--shelf-padding) 14px;
+  font-size: 12.5px;
+  color: var(--label-tertiary);
+}
+
+#hints .hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+#hints kbd {
+  display: inline-block;
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.06);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--label-secondary);
+}
