@@ -124,8 +124,7 @@ function cycleTab(step: number): void {
 function nudgeVolume(direction: 1 | -1): void {
   void api
     .audioCommand(direction === 1 ? "volume-up" : "volume-down")
-    .then(() => api.getAudio())
-    .then(([volume, muted]) => store.set({ audio: { volume, muted } }))
+    .then((result) => store.set({ audio: { volume: result.volume, muted: result.muted } }))
     .catch(() => undefined);
 }
 

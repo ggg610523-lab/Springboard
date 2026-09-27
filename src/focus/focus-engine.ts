@@ -35,10 +35,20 @@ const VECTORS: Record<Direction, [number, number]> = {
 export class FocusEngine {
   private zones = new Map<string, ZoneInfo>();
   private handlers = new WeakMap<HTMLElement, Handlers>();
+  private zoneCache = new WeakMap<HTMLElement, { id: string; info: ZoneInfo }>();
   private layerStack: string[] = ["home"];
   private current: HTMLElement | null = null;
   private memory = new Map<string, string>();
   private onFocusChange: ((el: HTMLElement | null) => void) | null = null;
+  private delegated = false;
+
+  constructor() {
+    // One delegated listener of each kind for the whole document (see
+    // `initDelegation`). The previous per-element listeners (pointerenter +
+    // click + contextmenu on every focusable — ~250 across the shelves) were
+    // destroyed and recreated on every re-render.
+    if (typeof document !== "undefined") this.initDelegation();
+  }
 
   private get layer(): string {
     return this.layerStack[this.layerStack.length - 1] ?? "home";
@@ -49,22 +59,51 @@ export class FocusEngine {
   }
 
   attach(el: HTMLElement, handlers: Handlers): void {
+    // Behaviour comes from the delegated document listeners installed in the
+    // constructor; attaching only registers the element.
+    if (!this.delegated && typeof document !== "undefined") this.initDelegation();
     this.handlers.set(el, handlers);
     el.classList.add("focusable");
-    el.addEventListener("pointerenter", () => this.focusElement(el));
-    el.addEventListener("click", (event) => {
+  }
+
+  /** Late wiring when the constructor ran before `document` existed. */
+  private initDelegation(): void {
+    this.delegated = true;
+    document.addEventListener("pointerover", (event) => {
+      const target = focusableTargetOf(event.target);
+      if (target) this.focusElement(target);
+    });
+    document.addEventListener("click", (event) => {
+      const target = focusableTargetOf(event.target);
+      if (!target) return;
       event.stopPropagation();
-      if (this.current !== el) {
-        this.focusElement(el);
+      if (this.current !== target) {
+        this.focusElement(target);
         return;
+      }
+      // When "Double-click to open" is configured, a single click only gives
+      // focus; a second click within the window interval activates the item.
+      if (target.classList.contains("tile") && event.detail === 1) {
+        // We'll check the store via a custom hook or dispatch if configured
+        const isDbl = target.ownerDocument?.documentElement?.dataset.doubleClick === "on";
+        if (isDbl) return;
       }
       this.activate();
     });
-    el.addEventListener("contextmenu", (event) => {
-      const handler = this.handlers.get(el);
+    document.addEventListener("dblclick", (event) => {
+      const target = focusableTargetOf(event.target);
+      if (!target) return;
+      event.stopPropagation();
+      this.focusElement(target);
+      this.activate();
+    });
+    document.addEventListener("contextmenu", (event) => {
+      const target = focusableTargetOf(event.target);
+      if (!target) return;
+      const handler = this.handlers.get(target);
       if (!handler?.onContext) return;
       event.preventDefault();
-      this.focusElement(el);
+      this.focusElement(target);
       handler.onContext();
     });
   }
@@ -79,6 +118,28 @@ export class FocusEngine {
 
   unregisterZone(id: string): void {
     this.zones.delete(id);
+  }
+
+  /**
+   * Drop every zone registered inside `root`.
+   *
+   * Overlays register their own zones while building; without this the map
+   * keeps detached zones around forever, and a second overlay reusing the same
+   * zone id (a confirm dialog on top of an info dialog) permanently overwrites
+   * the one underneath — leaving that sheet with no focusable zone at all.
+   */
+  unregisterZonesIn(root: HTMLElement): void {
+    for (const [id, info] of this.zones) {
+      if (info.element === root || root.contains(info.element)) this.zones.delete(id);
+    }
+  }
+
+  /**
+   * Re-point focus when a re-render detached the focused element, so arrow
+   * keys / Enter never act on a node that is no longer in the document.
+   */
+  private ensureConnected(): void {
+    if (this.current && !this.current.isConnected) this.rebuild();
   }
 
   pushLayer(layer: string): void {
@@ -100,13 +161,13 @@ export class FocusEngine {
   }
 
   /** Focusables of the active layer, in zone-then-DOM order. */
-  private collect(): { el: HTMLElement; zone: ZoneInfo }[] {
+  private collect(): { el: HTMLElement; zone: ZoneInfo; zoneId: string }[] {
     const active = this.layer;
-    const zones = [...this.zones.values()]
-      .filter((zone) => zone.layer === active)
-      .sort((a, b) => a.order - b.order);
-    const out: { el: HTMLElement; zone: ZoneInfo }[] = [];
-    for (const zone of zones) {
+    const zones = [...this.zones.entries()]
+      .filter(([, zone]) => zone.layer === active)
+      .sort((a, b) => a[1].order - b[1].order);
+    const out: { el: HTMLElement; zone: ZoneInfo; zoneId: string }[] = [];
+    for (const [zoneId, zone] of zones) {
       if (!zone.element.isConnected) continue;
       for (const node of zone.element.querySelectorAll<HTMLElement>(".focusable")) {
         if (!node.isConnected) continue;
@@ -114,14 +175,17 @@ export class FocusEngine {
         if (handler?.disabled?.()) continue;
         if (node.hasAttribute("data-focus-skip")) continue;
         if (!this.isRendered(node)) continue;
-        out.push({ el: node, zone });
+        out.push({ el: node, zone, zoneId });
       }
     }
     return out;
   }
 
   private isRendered(el: HTMLElement): boolean {
-    if (el.offsetParent === null && getComputedStyle(el).position !== "fixed") return false;
+    // Same test as before, minus the `getComputedStyle` call that forced a
+    // style recalc for every candidate on every key press: a `display:none`
+    // element reports an all-zero rect, and fixed-position elements (the old
+    // `position !== "fixed"` escape hatch) do too have a rect.
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   }
@@ -162,16 +226,23 @@ export class FocusEngine {
   }
 
   private setCurrent(el: HTMLElement | null): void {
-    if (this.current && this.current !== el) {
-      this.current.classList.remove("is-focused");
-      this.handlers.get(this.current)?.onBlur?.();
+    const prev = this.current;
+    if (prev && prev !== el) {
+      prev.classList.remove("is-focused");
+      prev.removeAttribute("aria-current");
+      this.handlers.get(prev)?.onBlur?.();
     }
     this.current = el;
     if (!el) {
+      this.syncRowHighlight(null);
       this.onFocusChange?.(null);
       return;
     }
     el.classList.add("is-focused");
+    // Expose the focused element to assistive tech and to CSS that keys off
+    // `[aria-current]` in addition to `.is-focused`.
+    el.setAttribute("aria-current", "true");
+    this.syncRowHighlight(el);
     const handler = this.handlers.get(el);
     const zone = this.zoneOf(el);
     if (handler?.key && zone) this.memory.set(zone.id, handler.key);
@@ -180,11 +251,40 @@ export class FocusEngine {
     this.onFocusChange?.(el);
   }
 
-  private zoneOf(el: HTMLElement): { id: string; info: ZoneInfo } | null {
-    for (const [id, info] of this.zones) {
-      if (info.element.contains(el)) return { id, info };
+  /**
+   * Mirror focus onto the owning row so the active shelf reads at a glance.
+   *
+   * The engine already toggles `.is-focused` on the element itself; this adds
+   * `.is-row-focused` to the closest `.shelf-section` (see `selection.css`),
+   * giving every shelf a visible "this row owns the remote" state.
+   */
+  private syncRowHighlight(el: HTMLElement | null): void {
+    const sections = document.querySelectorAll<HTMLElement>(".shelf-section.is-row-focused");
+    for (const section of sections) {
+      if (!el || !section.contains(el)) section.classList.remove("is-row-focused");
     }
-    return null;
+    const owner = el?.closest<HTMLElement>(".shelf-section");
+    if (owner && !owner.classList.contains("is-row-focused")) {
+      owner.classList.add("is-row-focused");
+    }
+  }
+
+  private zoneOf(el: HTMLElement): { id: string; info: ZoneInfo } | null {
+    // Memoised: `move` used to walk every zone (with a `contains` ancestry
+    // test per zone) for every candidate on every key press. The containment
+    // re-check keeps the cache honest when elements are re-parented.
+    const cached = this.zoneCache.get(el);
+    if (cached && cached.info.element.contains(el)) return cached;
+    let found: { id: string; info: ZoneInfo } | null = null;
+    for (const [id, info] of this.zones) {
+      if (info.element.contains(el)) {
+        found = { id, info };
+        break;
+      }
+    }
+    if (found) this.zoneCache.set(el, found);
+    else this.zoneCache.delete(el);
+    return found;
   }
 
   get focused(): HTMLElement | null {
@@ -211,11 +311,12 @@ export class FocusEngine {
   }
 
   focusFirst(zoneId?: string): void {
-    const items = this.collect().filter((item) => !zoneId || this.zoneOf(item.el)?.id === zoneId);
+    const items = this.collect().filter((item) => !zoneId || item.zoneId === zoneId);
     if (items.length) this.setCurrent(items[0].el);
   }
 
   activate(): boolean {
+    this.ensureConnected();
     const handler = this.current ? this.handlers.get(this.current) : undefined;
     if (!handler?.onActivate) return false;
     handler.onActivate();
@@ -223,6 +324,7 @@ export class FocusEngine {
   }
 
   context(): boolean {
+    this.ensureConnected();
     const handler = this.current ? this.handlers.get(this.current) : undefined;
     if (!handler?.onContext) return false;
     handler.onContext();
@@ -231,15 +333,21 @@ export class FocusEngine {
 
   /** Move focus one step in a direction, tvOS style. */
   move(direction: Direction): boolean {
+    this.ensureConnected();
     if (!this.current) {
       this.focusFirst();
-      return true;
+      return Boolean(this.current);
     }
     const handler = this.handlers.get(this.current);
     if (handler?.onMove?.(direction)) return true;
 
     const items = this.collect();
-    const source = this.current.getBoundingClientRect();
+    // One geometry pass per key press: every candidate rect is snapshotted
+    // once, and each element's zone id comes straight from `collect` instead
+    // of a second ancestry walk per candidate.
+    const rects = new Map<HTMLElement, DOMRect>();
+    for (const item of items) rects.set(item.el, item.el.getBoundingClientRect());
+    const source = rects.get(this.current) ?? this.current.getBoundingClientRect();
     const origin = { x: source.left + source.width / 2, y: source.top + source.height / 2 };
     const [dx, dy] = VECTORS[direction];
     const sourceZone = this.zoneOf(this.current)?.id;
@@ -247,8 +355,8 @@ export class FocusEngine {
     let best: { el: HTMLElement; score: number } | null = null;
     for (const item of items) {
       if (item.el === this.current) continue;
-      const rect = item.el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
+      const rect = rects.get(item.el);
+      if (!rect || rect.width === 0 || rect.height === 0) continue;
       const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
       const deltaX = center.x - origin.x;
       const deltaY = center.y - origin.y;
@@ -270,12 +378,19 @@ export class FocusEngine {
 
       let score = primary + cross * (overlap ? 1.9 : 3.4);
       if (!overlap) score += 26;
-      // Vertical travel prefers rows that are actually on screen.
-      if (dy !== 0 && !this.isOnScreen(rect)) score += 180;
+      // Vertical travel prefers rows that are actually on screen. Chrome zones
+      // (topbar lives above the scroll stage) are always valid targets —
+      // without this the top bar was unreachable from the Movies shelves.
+      const isChrome = item.zoneId === "topbar" || item.zoneId === "topshelf";
+      if (dy !== 0 && !isChrome && !this.isOnScreen(rect)) score += 180;
       // Slight bonus for staying inside the same zone.
-      const sameZone = this.zoneOf(item.el)?.id === sourceZone;
+      const sameZone = item.zoneId === sourceZone;
       if (sameZone) score -= 14;
       if (overlap && sameZone) score -= 10;
+      // Pressing Up from a shelf should reliably surface the chrome above it:
+      // the hero pills sit ~200px closer than the tab row, so give the topbar
+      // a bonus that outweighs the distance gap when travelling upward.
+      if (direction === "up" && item.zoneId === "topbar") score -= 420;
 
       if (!best || score < best.score) best = { el: item.el, score };
     }
@@ -286,16 +401,15 @@ export class FocusEngine {
     }
 
     // Nothing in that direction: wrap horizontally, then vertically.
-    return this.wrap(direction);
+    return this.wrap(direction, items);
   }
 
   /** tvOS wraps around the ends of a row and between rows. */
-  private wrap(direction: Direction): boolean {
+  private wrap(direction: Direction, items: { el: HTMLElement; zoneId: string }[]): boolean {
     if (!this.current) return false;
     const zone = this.zoneOf(this.current);
     if (!zone) return false;
-    const all = this.collect();
-    const inZone = all.filter((item) => this.zoneOf(item.el)?.id === zone.id);
+    const inZone = items.filter((item) => item.zoneId === zone.id);
     const index = inZone.findIndex((item) => item.el === this.current);
     if (index < 0) return false;
 
@@ -327,6 +441,15 @@ export class FocusEngine {
   }
 
   private isOnScreen(rect: DOMRect): boolean {
+    // Measure against the real scroll container (#stage) rather than the
+    // window: the stage sits between the top bar and the hints bar, so the
+    // window-based test was ~140px off at the bottom of the screen and
+    // mis-penalised the last row.
+    const stage = document.getElementById("stage");
+    if (stage) {
+      const view = stage.getBoundingClientRect();
+      return rect.top >= view.top - 6 && rect.bottom <= view.bottom + 6;
+    }
     return rect.top >= -6 && rect.bottom <= window.innerHeight + 6;
   }
 
@@ -369,13 +492,19 @@ export class FocusEngine {
   get items(): FocusTarget[] {
     return this.collect().map((item) => ({
       el: item.el,
-      zone: this.zoneOf(item.el)?.id ?? "",
+      zone: item.zoneId,
       key: this.handlers.get(item.el)?.key,
     }));
   }
 }
 
 export const focusEngine = new FocusEngine();
+
+/** Nearest focusable ancestor of an event target (delegated listeners). */
+function focusableTargetOf(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof Element)) return null;
+  return target.closest<HTMLElement>(".focusable");
+}
 
 /** Attach behaviour + a stable focus key to an element. */
 export function makeFocusable(

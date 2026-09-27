@@ -170,9 +170,9 @@ function buildProfile(node: HTMLElement): void {
 function changeVolume(direction: 1 | -1): void {
   void api
     .audioCommand(direction === 1 ? "volume-up" : "volume-down")
-    .then(() => api.getAudio())
-    .then(([volume, muted]) => {
-      store.set({ audio: { volume, muted } });
+    .then((result) => {
+      // The command returns the post-action state — no second round trip.
+      store.set({ audio: { volume: result.volume, muted: result.muted } });
       syncVolumeUi();
     })
     .catch(() => undefined);
@@ -181,9 +181,8 @@ function changeVolume(direction: 1 | -1): void {
 function toggleMute(): void {
   void api
     .audioCommand("volume-mute")
-    .then(() => api.getAudio())
-    .then(([volume, muted]) => {
-      store.set({ audio: { volume, muted } });
+    .then((result) => {
+      store.set({ audio: { volume: result.volume, muted: result.muted } });
       syncVolumeUi();
     })
     .catch(() => undefined);
@@ -192,7 +191,7 @@ function toggleMute(): void {
 function syncVolumeUi(): void {
   const stored = store.state.audio.volume ?? store.state.settings.volume;
   const volume = Math.max(0, Math.min(100, stored));
-  if (volFill) volFill.style.width = `${volume}%`;
+  if (volFill) volFill.style.setProperty("--fill", (volume / 100).toFixed(4));
   if (volPct) volPct.textContent = `${Math.round(volume)}%`;
   if (muteSwitch) muteSwitch.classList.toggle("is-on", Boolean(store.state.audio.muted));
 }
@@ -345,8 +344,11 @@ function clearSleepHandle(): void {
 function fire(action: string): void {
   void api
     .audioCommand(action)
-    .then((message) => {
-      if (message) toast(message, "ok");
+    .then((result) => {
+      if (result.message) toast(result.message, "ok");
+      if (result.volume !== null || result.muted !== null) {
+        store.set({ audio: { volume: result.volume, muted: result.muted } });
+      }
     })
     .catch((error: unknown) => toast(String(error), "error"));
 }

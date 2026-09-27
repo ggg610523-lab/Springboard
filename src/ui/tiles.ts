@@ -1,29 +1,50 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, iconUrl, mediaMeta, posterUrl } from "../api";
 import { focusEngine, makeFocusable } from "../focus/focus-engine";
-import { washFor } from "../palette";
+import { setBodyWash, washFor } from "../palette";
 import { sound } from "../sound";
-import { actions, store } from "../state";
-import type { AppInfo, MediaItem } from "../types";
+import { actions, profileSets, settingsSets, store } from "../state";
+import type { AppTile, MediaItem } from "../types";
 import { el, icon } from "./icons";
-import { showDialog, showPicker } from "./dialog";
+import { showDialog, showPicker, nextZoneId } from "./dialog";
 import { showActionMenu } from "./menu";
 import { openOverlay, toast } from "./overlay";
 
-/** Parallax the artwork slightly while the pointer travels over a tile. */
-function addParallax(art: HTMLElement): void {
-  art.addEventListener("pointermove", (event) => {
-    if (!store.state.settings.parallax) return;
-    const rect = art.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width - 0.5) * 12;
-    const y = ((event.clientY - rect.top) / rect.height - 0.5) * 12;
-    art.style.setProperty("--px", `${x.toFixed(2)}px`);
-    art.style.setProperty("--py", `${y.toFixed(2)}px`);
-  });
-  art.addEventListener("pointerleave", () => {
-    art.style.setProperty("--px", "0px");
-    art.style.setProperty("--py", "0px");
-  });
+/**
+ * Parallax the artwork slightly while the pointer travels over a tile.
+ *
+ * One delegated listener for the whole document instead of a
+ * `pointermove`/`pointerleave` pair per tile (~62 tiles × 2 listeners that were
+ * torn down and recreated on every re-render).
+ */
+let parallaxWired = false;
+let parallaxArt: HTMLElement | null = null;
+
+function wireParallax(): void {
+  if (parallaxWired) return;
+  parallaxWired = true;
+  document.addEventListener(
+    "pointermove",
+    (event) => {
+      if (!store.state.settings.parallax) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const art = target?.closest<HTMLElement>(".tile-art") ?? null;
+      if (art !== parallaxArt) {
+        // Reset the artwork we just left so it settles back flat.
+        parallaxArt?.style.setProperty("--px", "0px");
+        parallaxArt?.style.setProperty("--py", "0px");
+        parallaxArt = art;
+      }
+      if (!art) return;
+      const rect = art.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      const x = ((event.clientX - rect.left) / rect.width - 0.5) * 12;
+      const y = ((event.clientY - rect.top) / rect.height - 0.5) * 12;
+      art.style.setProperty("--px", `${x.toFixed(2)}px`);
+      art.style.setProperty("--py", `${y.toFixed(2)}px`);
+    },
+    { passive: true },
+  );
 }
 
 /** Build the rounded artwork square: image on top of a gradient fallback. */
@@ -45,15 +66,22 @@ function artWithImage(src: string | null, fallback: HTMLElement | null, alt: str
     });
     art.appendChild(img);
   }
-  addParallax(art);
+  wireParallax();
   return art;
 }
 
+const initialsCache = new Map<string, string>();
+
 function initialsOf(name: string): string {
+  const cached = initialsCache.get(name);
+  if (cached !== undefined) return cached;
   const words = name.replace(/[^\p{L}\p{N} ]+/gu, " ").split(/\s+/).filter(Boolean);
-  if (!words.length) return "?";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return `${words[0][0]}${words[1][0]}`.toUpperCase();
+  let value: string;
+  if (!words.length) value = "?";
+  else if (words.length === 1) value = words[0].slice(0, 2).toUpperCase();
+  else value = `${words[0][0]}${words[1][0]}`.toUpperCase();
+  initialsCache.set(name, value);
+  return value;
 }
 
 function tileBadge(iconName: string, extraClass = ""): HTMLElement {
@@ -65,12 +93,11 @@ function tileBadge(iconName: string, extraClass = ""): HTMLElement {
 /** Paint the backdrop wash for the focused item. */
 function setWash(seed: string): void {
   const { a, b } = washFor(seed);
-  document.body.style.setProperty("--wash-a", a);
-  document.body.style.setProperty("--wash-b", b);
+  setBodyWash(a, b);
 }
 
 /** Launch a real application, honouring the confirm/hide settings. */
-export function launchApp(app: AppInfo): void {
+export function launchApp(app: AppTile): void {
   const settings = store.state.settings;
   const run = (): void => {
     sound.launch();
@@ -110,15 +137,15 @@ export function launchApp(app: AppInfo): void {
 }
 
 /** One app tile, styled like a tvOS home screen icon. */
-export function appTile(app: AppInfo, focusKey: string): HTMLElement {
+export function appTile(app: AppTile, focusKey: string): HTMLElement {
   const tile = el("button", "tile");
   tile.dataset.appId = app.id;
   const src = iconUrl(app.iconName, app.iconPath);
   const fallback = el("div", "tile-art__fallback", initialsOf(app.name));
   tile.appendChild(artWithImage(src, fallback, app.name));
 
-  const isFavorite = store.state.settings.favorites.includes(app.id);
-  const isHidden = store.state.settings.hiddenApps.includes(app.id);
+  const isFavorite = settingsSets().favorites.has(app.id);
+  const isHidden = settingsSets().hidden.has(app.id);
   if (isFavorite || isHidden) {
     const badges = el("div", "tile-badges");
     if (isFavorite) badges.appendChild(tileBadge("star", "tile-badge--like"));
@@ -164,9 +191,8 @@ export function mediaTile(item: MediaItem, focusKey: string): HTMLElement {
   fallback.appendChild(el("span", undefined, item.title));
   tile.appendChild(artWithImage(src, fallback, item.title));
 
-  const profile = store.state.profile;
-  const liked = profile.liked.includes(item.id);
-  const watched = profile.watched.includes(item.id);
+  const liked = profileSets().liked.has(item.id);
+  const watched = profileSets().watched.has(item.id);
   if (liked || watched) {
     const badges = el("div", "tile-badges");
     if (liked) badges.appendChild(tileBadge("heart", "tile-badge--like"));
@@ -276,10 +302,10 @@ export function playOnPicker(item: MediaItem, returnKey?: string): void {
 }
 
 /** tvOS long-press menu for an app tile. */
-export function openAppMenu(app: AppInfo, anchor: HTMLElement): void {
+export function openAppMenu(app: AppTile, anchor: HTMLElement): void {
   const settings = store.state.settings;
-  const favorite = settings.favorites.includes(app.id);
-  const hidden = settings.hiddenApps.includes(app.id);
+  const favorite = settingsSets().favorites.has(app.id);
+  const hidden = settingsSets().hidden.has(app.id);
   showActionMenu(
     anchor,
     [
@@ -320,8 +346,18 @@ export function openAppMenu(app: AppInfo, anchor: HTMLElement): void {
         icon: "folder",
         label: "Open .desktop Folder",
         action: () => {
-          const dir = app.desktopFile.replace(/\/[^/]+$/, "");
-          void api.openTarget(dir).catch(() => toast("Could not open the folder", "error"));
+          // The lean tile record has no `desktopFile`; fetch it on demand.
+          void api
+            .appDetails(app.id)
+            .then((details) => {
+              if (!details) {
+                toast("Could not locate the .desktop file", "error");
+                return;
+              }
+              const dir = details.desktopFile.replace(/\/[^/]+$/, "");
+              return api.openTarget(dir);
+            })
+            .catch(() => toast("Could not open the folder", "error"));
         },
       },
     ],
@@ -331,10 +367,9 @@ export function openAppMenu(app: AppInfo, anchor: HTMLElement): void {
 
 /** tvOS long-press menu for a poster. */
 export function openMediaMenu(item: MediaItem, anchor: HTMLElement): void {
-  const profile = store.state.profile;
-  const liked = profile.liked.includes(item.id);
-  const disliked = profile.disliked.includes(item.id);
-  const watched = profile.watched.includes(item.id);
+  const liked = profileSets().liked.has(item.id);
+  const disliked = profileSets().disliked.has(item.id);
+  const watched = profileSets().watched.has(item.id);
   showActionMenu(
     anchor,
     [
@@ -377,22 +412,37 @@ export function openMediaMenu(item: MediaItem, anchor: HTMLElement): void {
 }
 
 /** Read-only info sheet listing everything the desktop entry exposes. */
-export function showAppInfo(app: AppInfo): void {
-  const rows: [string, string][] = [
-    ["Name", app.name],
-    ["Generic name", app.genericName ?? "—"],
-    ["Description", app.comment ?? "—"],
-    ["Category", app.group],
-    ["Exec", app.exec],
-    ["Desktop file", app.desktopFile],
-    ["Icon", app.iconPath ?? app.iconName ?? "—"],
-    ["Source", app.isFlatpak ? "Flatpak" : app.isSnap ? "Snap" : "Native package"],
-    ["Terminal", app.terminal ? "Yes" : "No"],
-    ["Window class", app.startupWmClass ?? "—"],
-    ["Categories", app.categories.join(", ") || "—"],
-    ["Keywords", app.keywords.join(", ") || "—"],
-  ];
+/**
+ * Details sheet for an app.
+ *
+ * The tile record is lean, so the heavyweight desktop-entry fields (Exec,
+ * categories, terminal, …) are fetched on demand — one local IPC call for a
+ * screen the user opens deliberately.
+ */
+export function showAppInfo(app: AppTile): void {
+  void api
+    .appDetails(app.id)
+    .catch(() => null)
+    .then((details) => {
+      const rows: [string, string][] = [
+        ["Name", app.name],
+        ["Generic name", app.genericName ?? "—"],
+        ["Description", app.comment ?? "—"],
+        ["Category", app.group],
+        ["Exec", details?.exec ?? "—"],
+        ["Desktop file", details?.desktopFile ?? "—"],
+        ["Icon", app.iconPath ?? app.iconName ?? "—"],
+        ["Source", app.isFlatpak ? "Flatpak" : app.isSnap ? "Snap" : "Native package"],
+        ["Terminal", details?.terminal ? "Yes" : "No"],
+        ["Window class", details?.startupWmClass ?? "—"],
+        ["Categories", details?.categories.join(", ") || "—"],
+        ["Keywords", app.keywords.join(", ") || "—"],
+      ];
+      paintAppInfo(app, rows);
+    });
+}
 
+function paintAppInfo(app: AppTile, rows: [string, string][]): void {
   openOverlay({
     layer: "info",
     className: "overlay--info",
@@ -424,7 +474,7 @@ export function showAppInfo(app: AppInfo): void {
       actions2.appendChild(closeButton);
       card.appendChild(actions2);
       root.appendChild(card);
-      focusEngine.registerZone("info-actions", actions2, 1);
+      focusEngine.registerZone(nextZoneId("info-actions"), actions2, 1);
       requestAnimationFrame(() => focusEngine.focusKey("info-close"));
     },
   });

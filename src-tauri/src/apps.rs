@@ -1,22 +1,41 @@
 use crate::model::AppInfo;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+/// Push a directory unless it is already in the list.
+///
+/// `dirs::data_dir()` is `~/.local/share` on Linux, so the XDG and the literal
+/// home path collide; without this the user's application directory is walked
+/// twice per scan.
+fn push_unique(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dirs.contains(&dir) {
+        dirs.push(dir);
+    }
+}
 
 /// All directories that may hold `.desktop` files, most specific first.
 pub fn desktop_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(data) = dirs::data_dir() {
-        dirs.push(data.join("applications"));
+        push_unique(&mut dirs, data.join("applications"));
     }
     if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".local/share/applications"));
-        dirs.push(home.join(".local/share/flatpak/exports/share/applications"));
+        push_unique(&mut dirs, home.join(".local/share/applications"));
+        push_unique(
+            &mut dirs,
+            home.join(".local/share/flatpak/exports/share/applications"),
+        );
     }
-    dirs.push(PathBuf::from("/usr/local/share/applications"));
-    dirs.push(PathBuf::from("/usr/share/applications"));
-    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
-    dirs.push(PathBuf::from("/var/lib/snapd/desktop/applications"));
+    for dir in [
+        "/usr/local/share/applications",
+        "/usr/share/applications",
+        "/var/lib/flatpak/exports/share/applications",
+        "/var/lib/snapd/desktop/applications",
+    ] {
+        push_unique(&mut dirs, PathBuf::from(dir));
+    }
     dirs
 }
 
@@ -147,7 +166,6 @@ fn collect_desktop_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     }
 }
 
-#[allow(dead_code)]
 fn current_desktops() -> Vec<String> {
     let raw = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     raw.split(':')
@@ -255,26 +273,59 @@ pub fn exec_argv(exec: &str) -> Vec<String> {
     args
 }
 
+/// Memoised `which()` results.
+///
+/// Probing `$PATH` is syscall-heavy (one `stat()` per entry) and the launcher
+/// asks for the same handful of programs dozens of times per run — the
+/// catalogue sync alone probes `curl` once per genre seed.
+fn which_cache() -> &'static Mutex<HashMap<String, bool>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `$PATH` split once for the lifetime of the process.
+fn path_dirs() -> &'static [PathBuf] {
+    static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .collect()
+    })
+}
+
 /// Is `program` resolvable on `$PATH` (or an absolute path that exists)?
 pub fn which(program: &str) -> bool {
     let program = program.split_whitespace().next().unwrap_or("");
     if program.is_empty() {
         return false;
     }
-    let p = Path::new(program);
-    if p.is_absolute() {
-        return p.exists();
+    if let Ok(cache) = which_cache().lock() {
+        if let Some(&hit) = cache.get(program) {
+            return hit;
+        }
     }
-    let path = std::env::var("PATH").unwrap_or_default();
-    path.split(':')
-        .any(|dir| !dir.is_empty() && Path::new(dir).join(program).exists())
+
+    let p = Path::new(program);
+    let found = if p.is_absolute() {
+        p.exists()
+    } else {
+        path_dirs().iter().any(|dir| dir.join(program).exists())
+    };
+
+    if let Ok(mut cache) = which_cache().lock() {
+        cache.insert(program.to_string(), found);
+    }
+    found
 }
 
 /// Scan the system for launchable applications. Directories are visited
 /// most-specific-first so user entries shadow system ones with the same id.
 pub fn scan_apps() -> Vec<AppInfo> {
     let desktops = current_desktops();
-    let mut seen: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let mut apps: Vec<AppInfo> = Vec::new();
 
     for dir in desktop_dirs() {
@@ -286,14 +337,15 @@ pub fn scan_apps() -> Vec<AppInfo> {
         files.sort();
         for file in files {
             let id = desktop_id(&file, &dir);
-            if seen.iter().any(|s| s == &id) {
-                continue;
-            }
             let Some(entry) = parse_desktop_file(&file) else {
                 continue;
             };
-            seen.push(id.clone());
-
+            // Insert before the visibility checks so that a hidden entry in a
+            // more specific directory still shadows the system one, exactly as
+            // the previous linear scan did.
+            if !seen.insert(id.clone()) {
+                continue;
+            }
             let kind = entry.get("Type").unwrap_or("Application");
             if kind != "Application" || entry.bool("Hidden") {
                 continue;

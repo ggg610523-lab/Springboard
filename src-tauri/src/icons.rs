@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Extensions we can hand to the webview, best first.
 const EXTS: &[(&str, u32)] = &[
@@ -369,22 +369,77 @@ pub fn name_from_uri(uri: &str) -> Option<String> {
     None
 }
 
+/// MIME type for a path, decided from the raw extension bytes so no `String`
+/// is allocated. This runs for every `appicon://` request (dozens per render).
 pub fn mime_for(path: &str) -> &'static str {
     let ext = Path::new(path)
         .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .map(|e| e.as_encoded_bytes())
         .unwrap_or_default();
-    match ext.as_str() {
-        "png" => "image/png",
-        "svg" | "svgz" => "image/svg+xml",
-        "webp" => "image/webp",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "xpm" => "image/x-xpixmap",
-        "ico" => "image/x-icon",
-        _ => "application/octet-stream",
+    if ext.eq_ignore_ascii_case(b"png") {
+        "image/png"
+    } else if ext.eq_ignore_ascii_case(b"svg") || ext.eq_ignore_ascii_case(b"svgz") {
+        "image/svg+xml"
+    } else if ext.eq_ignore_ascii_case(b"webp") {
+        "image/webp"
+    } else if ext.eq_ignore_ascii_case(b"jpg") || ext.eq_ignore_ascii_case(b"jpeg") {
+        "image/jpeg"
+    } else if ext.eq_ignore_ascii_case(b"gif") {
+        "image/gif"
+    } else if ext.eq_ignore_ascii_case(b"bmp") {
+        "image/bmp"
+    } else if ext.eq_ignore_ascii_case(b"xpm") {
+        "image/x-xpixmap"
+    } else if ext.eq_ignore_ascii_case(b"ico") {
+        "image/x-icon"
+    } else {
+        "application/octet-stream"
     }
+}
+
+/// Bounded in-process cache of decoded icon bytes, keyed by file path.
+///
+/// The same app icon is fetched by the Top Shelf, the tile and the search
+/// results, so a warm home screen re-read the same handful of files many times
+/// per render. A small bound keeps the footprint predictable (~64 × 40 kB).
+const ICON_CACHE_LIMIT: usize = 64;
+
+#[derive(Default)]
+struct ByteCache {
+    entries: HashMap<String, (Arc<Vec<u8>>, &'static str)>,
+    order: VecDeque<String>,
+}
+
+fn byte_cache() -> &'static Mutex<ByteCache> {
+    static CACHE: OnceLock<Mutex<ByteCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ByteCache::default()))
+}
+
+/// Read an icon from disk, reusing the cached copy when there is one.
+fn cached_bytes(path: &str) -> Option<(Arc<Vec<u8>>, &'static str)> {
+    if let Ok(cache) = byte_cache().lock() {
+        if let Some(hit) = cache.entries.get(path) {
+            return Some(hit.clone());
+        }
+    }
+    let bytes = fs::read(path).ok()?;
+    let mime = mime_for(path);
+    let arc = Arc::new(bytes);
+    if let Ok(mut cache) = byte_cache().lock() {
+        if cache
+            .entries
+            .insert(path.to_string(), (arc.clone(), mime))
+            .is_none()
+        {
+            cache.order.push_back(path.to_string());
+            while cache.order.len() > ICON_CACHE_LIMIT {
+                if let Some(oldest) = cache.order.pop_front() {
+                    cache.entries.remove(&oldest);
+                }
+            }
+        }
+    }
+    Some((arc, mime))
 }
 
 /// Serves `appicon://localhost/?n=<icon-name>` requests for the webview.
@@ -405,16 +460,15 @@ pub fn protocol_response(uri: &str) -> tauri::http::Response<Vec<u8>> {
     let Some(path) = resolve(&name) else {
         return not_found();
     };
-    let Ok(bytes) = fs::read(&path) else {
+    let Some((bytes, mime)) = cached_bytes(&path) else {
         return not_found();
     };
-    let mime = mime_for(&path);
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime)
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(bytes)
+        .body(bytes.as_ref().clone())
         .unwrap_or_else(|_| not_found())
 }
 

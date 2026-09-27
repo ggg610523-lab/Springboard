@@ -155,7 +155,9 @@
   font-weight: 600;
   background: rgba(255, 255, 255, 0.16);
   color: var(--label-primary);
-  backdrop-filter: blur(20px);
+  /* No backdrop-filter: `.btn` is instanced in every dialog and hero row, and
+     blur is the most expensive WebKitGTK primitive. A translucent solid reads
+     the same. */
   transition: transform var(--tv-dur) var(--tv-ease),
     background var(--tv-dur-fast) linear, color var(--tv-dur-fast) linear;
 }

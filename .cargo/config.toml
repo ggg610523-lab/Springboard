@@ -1,0 +1,8 @@
+# Cargo configuration for building inside this repository.
+#
+# ts-rs maps i64/u64/i128/u128 to `bigint` by default, but serde_json writes
+# them as plain JSON numbers (and JavaScript only has `number`). Binding them
+# to `number` keeps the generated TypeScript in sync with the actual wire
+# format.
+[env]
+TS_RS_LARGE_INT = "number"
