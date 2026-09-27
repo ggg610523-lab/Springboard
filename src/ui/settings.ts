@@ -281,7 +281,6 @@ function panelGeneral(content: HTMLElement): void {
   panelHeader(content, "General", "Behaviour of the launcher window and the remote.");
   groupTitle(content, "Launch");
   content.appendChild(switchRow("Confirm before opening", "Show a dialog every time you open an app.", "confirmLaunch"));
-  content.appendChild(switchRow("Double-click to open", "Require double-clicking tiles to launch or open them.", "doubleClickToOpen"));
   content.appendChild(switchRow("Hide after launch", "Minimise the launcher once an app starts.", "hideOnLaunch"));
   content.appendChild(switchRow("Start fullscreen", "Fill the screen on startup.", "fullscreenOnStart"));
   content.appendChild(switchRow("Keep on top", "Float above every other window.", "alwaysOnTop"));
@@ -502,15 +501,8 @@ function panelSound(content: HTMLElement): void {
   content.appendChild(sliderRow("Output volume", "volume", 0, 100, "%"));
   content.appendChild(
     actionRow("Mute / unmute", "Toggle the system mute state.", "volumeMute", "mute", async () => {
-      const outcome = await api.audioCommand("volume-mute").catch((error: unknown) => ({
-        volume: null,
-        muted: null,
-        message: `error: ${String(error)}`,
-      }));
-      if (outcome.volume !== null || outcome.muted !== null) {
-        store.set({ audio: { volume: outcome.volume, muted: outcome.muted } });
-      }
-      toast(outcome.message, "ok");
+      const outcome = await api.audioCommand("volume-mute").catch((error: unknown) => `error: ${String(error)}`);
+      toast(String(outcome), "ok");
     }),
   );
   groupTitle(content, "System");

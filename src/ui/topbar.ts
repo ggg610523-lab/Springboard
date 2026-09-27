@@ -3,7 +3,7 @@ import { store, type TabId } from "../state";
 import type { Settings } from "../types";
 import { el, icon } from "./icons";
 import { focusEngine, makeFocusable } from "../focus/focus-engine";
-import { openControlCentreLazy } from "../lazy";
+import { openControlCentre } from "./control-centre";
 
 interface TabDef {
   id: TabId;
@@ -84,7 +84,7 @@ export function renderTopbar(): void {
       onFocus: () => sound.focus(),
       onActivate: () => {
         sound.select();
-        openControlCentreLazy();
+        openControlCentre();
       },
     },
     "tab-control",

@@ -13,10 +13,6 @@ export function renderShelves(): void {
   const rows = document.getElementById("rows");
   if (!rows) return;
 
-  const focused = focusEngine.focused;
-  const hadFocus = focused ? rows.contains(focused) : false;
-  const focusKey = focused ? focusEngine.handlersFor(focused)?.key : undefined;
-
   const fragment = document.createDocumentFragment();
   for (const shelf of shelvesFor(store.state.tab) as Shelf[]) {
     const section = el("section", "shelf-section");
@@ -63,7 +59,4 @@ export function renderShelves(): void {
   }
 
   rows.replaceChildren(fragment);
-  // Tiles keep their focus keys, so the remote lands back on the same tile
-  // (or the nearest remembered one) instead of dying on a detached node.
-  if (hadFocus) focusEngine.rebuild(focusKey);
 }

@@ -36,23 +36,11 @@ function clockText(now: Date): string {
 }
 
 function dateText(now: Date): string {
-  return dateFormatter().format(now);
-}
-
-/**
- * One `Intl.DateTimeFormat` for the whole session.
- *
- * `toLocaleDateString` rebuilds (and re-lands) a formatter on every call, which
- * runs on every 30 s AOD tick and on every AOD show.
- */
-let cachedDateFormatter: Intl.DateTimeFormat | null = null;
-function dateFormatter(): Intl.DateTimeFormat {
-  cachedDateFormatter ??= new Intl.DateTimeFormat(undefined, {
+  return now.toLocaleDateString(undefined, {
     weekday: "long",
     day: "numeric",
     month: "long",
-  });
-  return cachedDateFormatter;
+  } as Intl.DateTimeFormatOptions);
 }
 
 /** Seconds of inactivity before the AOD arms (never while typing in search). */
@@ -206,15 +194,7 @@ export function isAodActive(): boolean {
 
 /** Re-apply the current AOD settings to a live ambient screen, if any. */
 export function refreshAod(): void {
-  if (!store.state.settings.aodEnabled || store.state.settings.aodTimeoutMins === 0) {
-    if (state === "on") dismiss();
-    else teardown();
-    return;
-  }
-  if (!root) {
-    if (state === "off") schedule();
-    return;
-  }
+  if (!root) return;
   root.style.setProperty("--aod-dim", String(store.state.settings.aodDim / 100));
   if (state === "on" && !root.classList.contains("aod--sheet")) {
     root.dataset.style = FULLSCREEN_STYLES.includes(store.state.settings.aodStyle)

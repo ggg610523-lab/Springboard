@@ -1,12 +1,5 @@
-import {
-  profileSets,
-  settingsSets,
-  store,
-  usageMaps,
-  type Shelf,
-  type TabId,
-} from "./state";
-import type { AppTile, MediaItem, Settings } from "./types";
+import { store, type Shelf, type TabId } from "./state";
+import type { AppInfo, MediaItem, Settings } from "./types";
 
 /** Preferred order for category rows; everything else follows alphabetically. */
 const CATEGORY_ORDER = [
@@ -31,8 +24,8 @@ function categoryRank(name: string): number {
 }
 
 /** Apps the launcher should show right now. */
-export function visibleApps(apps: AppTile[], settings: Settings): AppTile[] {
-  const { hidden } = settingsSets(settings);
+export function visibleApps(apps: AppInfo[], settings: Settings): AppInfo[] {
+  const hidden = new Set(settings.hiddenApps);
   return apps.filter((app) => {
     if (!settings.showNoDisplay && app.noDisplay) return false;
     if (!settings.showHidden && hidden.has(app.id)) return false;
@@ -40,25 +33,25 @@ export function visibleApps(apps: AppTile[], settings: Settings): AppTile[] {
   });
 }
 
-function sortByName(apps: AppTile[]): AppTile[] {
+function sortByName(apps: AppInfo[]): AppInfo[] {
   return [...apps].sort((a, b) =>
     a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }),
   );
 }
 
-/** Sort by launch count or recency using the cached usage maps. */
-function byUsage(apps: AppTile[], mode: "count" | "recent"): AppTile[] {
-  const maps = usageMaps();
-  const usage = mode === "count" ? maps.counts : maps.recent;
+function byUsage(apps: AppInfo[], mode: "count" | "recent"): AppInfo[] {
+  const usage = store.state.usage.apps;
   return [...apps].sort((a, b) => {
-    const leftValue = usage.get(a.id) ?? 0;
-    const rightValue = usage.get(b.id) ?? 0;
+    const left = usage[a.id];
+    const right = usage[b.id];
+    const leftValue = mode === "count" ? left?.count ?? 0 : left?.lastUsed ?? 0;
+    const rightValue = mode === "count" ? right?.count ?? 0 : right?.lastUsed ?? 0;
     if (rightValue !== leftValue) return rightValue - leftValue;
     return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
   });
 }
 
-function appShelf(id: string, title: string, badge: string, apps: AppTile[]): Shelf {
+function appShelf(id: string, title: string, badge: string, apps: AppInfo[]): Shelf {
   return { id, title, badge, kind: "apps", apps, items: [] };
 }
 
@@ -91,9 +84,9 @@ export function topGenres(limit = 3): string[] {
  * mixes both, which is what the Apple TV app does on "Watch Now".
  */
 function mediaShelves(tab: TabId, kindFilter: string[] | null): Shelf[] {
-  const { settings, catalog, recommendations } = store.state;
+  const { settings, catalog, recommendations, profile } = store.state;
   if (!settings.mediaEnabled) return [];
-  const disliked = profileSets().disliked;
+  const disliked = new Set(profile.disliked);
   const size = Math.max(6, settings.mediaShelfSize);
   const pass = (item: MediaItem): boolean =>
     !disliked.has(item.id) && (!kindFilter || matchesKind(item, kindFilter));
@@ -111,24 +104,14 @@ function mediaShelves(tab: TabId, kindFilter: string[] | null): Shelf[] {
     );
   }
 
-  // Filter and rank the catalogue once, then bucket by genre. The previous
-  // version re-filtered and re-sorted the whole catalogue for every shelf.
-  const passing = rankSort(catalog.filter(pass));
-  const byGenre = new Map<string, MediaItem[]>();
-  for (const item of passing) {
-    const bucket = byGenre.get(item.genre);
-    if (bucket) bucket.push(item);
-    else byGenre.set(item.genre, [item]);
-  }
-
   for (const genre of topGenres(3)) {
-    const items = (byGenre.get(genre) ?? []).slice(0, size);
+    const items = rankSort(catalog.filter((item) => pass(item) && item.genre === genre)).slice(0, size);
     if (items.length >= 3) {
       shelves.push(mediaShelf(`${tab}-like-${genre}`, `Because you like ${genre}`, genre, items));
     }
   }
 
-  const trending = passing.slice(0, size);
+  const trending = rankSort(catalog.filter(pass)).slice(0, size);
   if (trending.length) {
     const title =
       tab === "movies"
@@ -139,8 +122,9 @@ function mediaShelves(tab: TabId, kindFilter: string[] | null): Shelf[] {
     shelves.push(mediaShelf(`${tab}-trending`, title, "IMDb", trending));
   }
 
-  for (const genre of [...byGenre.keys()].slice(0, 6)) {
-    const items = (byGenre.get(genre) ?? []).slice(0, size);
+  const genres = [...new Set(catalog.filter(pass).map((item) => item.genre))];
+  for (const genre of genres.slice(0, 6)) {
+    const items = rankSort(catalog.filter((item) => pass(item) && item.genre === genre)).slice(0, size);
     if (items.length >= 3) {
       shelves.push(mediaShelf(`${tab}-${genre}`, genre, "IMDb", items));
     }
@@ -148,16 +132,8 @@ function mediaShelves(tab: TabId, kindFilter: string[] | null): Shelf[] {
   return shelves;
 }
 
-function sortApps(apps: AppTile[], mode: string): AppTile[] {
-  if (mode === "name") return sortByName(apps);
-  if (mode === "usage") return byUsage(apps, "count");
-  // Default: sort alphabetically within whatever grouping is active.
-  return sortByName(apps);
-}
-
 function appShelves(limitCategories: number): Shelf[] {
-  const { settings, apps } = store.state;
-  const { counts, recent: recentMap } = usageMaps();
+  const { settings, apps, usage } = store.state;
   const list = visibleApps(apps, settings);
   // Waydroid (Android) apps live on their own row, separate from Linux apps.
   const android = list.filter((app) => app.isWaydroid);
@@ -165,44 +141,39 @@ function appShelves(limitCategories: number): Shelf[] {
   const shelves: Shelf[] = [];
 
   if (android.length) {
-    shelves.push(appShelf("android", "Android Apps", "Waydroid", sortApps(android, settings.sortMode)));
+    shelves.push(appShelf("android", "Android Apps", "Waydroid", sortByName(android)));
   }
 
-  // Index the Linux apps once; the favourites and custom rows used to run a
-  // linear `find` over the list for every configured id.
-  const linuxById = new Map<string, AppTile>();
-  for (const app of linux) linuxById.set(app.id, app);
-
   const favorites = settings.favorites
-    .map((id) => linuxById.get(id))
-    .filter((app): app is AppTile => Boolean(app));
+    .map((id) => linux.find((app) => app.id === id))
+    .filter((app): app is AppInfo => Boolean(app));
   if (favorites.length) {
     shelves.push(appShelf("favorites", "Favorites", "Pinned", favorites));
   }
 
-  const recent = byUsage(linux, "recent").filter((app) => (recentMap.get(app.id) ?? 0) > 0);
+  const recent = byUsage(linux, "recent").filter((app) => (usage.apps[app.id]?.lastUsed ?? 0) > 0);
   if (recent.length) {
     shelves.push(appShelf("recent", "Recently Used", "Up Next", recent.slice(0, settings.maxRecent)));
   }
 
-  const mostUsed = byUsage(linux, "count").filter((app) => (counts.get(app.id) ?? 0) > 1);
+  const mostUsed = byUsage(linux, "count").filter((app) => (usage.apps[app.id]?.count ?? 0) > 1);
   if (mostUsed.length >= 3) {
     shelves.push(appShelf("most-used", "Most Used", "Smart", mostUsed.slice(0, settings.maxRecent)));
   }
 
   if (!settings.groupByCategory) {
-    shelves.push(appShelf("all", "All Apps", "Library", sortApps(linux, settings.sortMode)));
+    shelves.push(appShelf("all", "All Apps", "Library", sortByName(linux)));
     return shelves;
   }
 
   for (const row of settings.rows.filter((entry) => entry.source === "manual")) {
     const custom = row.appIds
-      .map((id) => linuxById.get(id))
-      .filter((app): app is AppTile => Boolean(app));
+      .map((id) => linux.find((app) => app.id === id))
+      .filter((app): app is AppInfo => Boolean(app));
     if (custom.length) shelves.push(appShelf(`custom-${row.id}`, row.title, "Custom", custom));
   }
 
-  const groups = new Map<string, AppTile[]>();
+  const groups = new Map<string, AppInfo[]>();
   for (const app of linux) {
     const key = app.group || "Other";
     const bucket = groups.get(key);
@@ -216,9 +187,7 @@ function appShelves(limitCategories: number): Shelf[] {
   let shown = 0;
   for (const [category, categoryApps] of ordered) {
     if (limitCategories > 0 && shown >= limitCategories) break;
-    shelves.push(
-      appShelf(`cat-${category}`, category, `${categoryApps.length}`, sortApps(categoryApps, settings.sortMode)),
-    );
+    shelves.push(appShelf(`cat-${category}`, category, `${categoryApps.length}`, sortByName(categoryApps)));
     shown += 1;
   }
   return shelves;
@@ -240,76 +209,26 @@ export function shelvesFor(tab: TabId): Shelf[] {
   }
 }
 
-let indexKey: AppTile[] | null = null;
-let indexSettings: Settings | null = null;
-let haystacks = new Map<string, string>();
-let indexedApps: AppTile[] = [];
-
-/**
- * Lowercased search text per app.
- *
- * The old helper rebuilt `[...fields].filter(Boolean).join(" ").toLowerCase()`
- * for every app on every keystroke; this keeps one haystack per app and only
- * rebuilds when the app list or the visibility settings change.
- */
-function appSearchIndex(): { index: Map<string, string>; apps: AppTile[] } {
-  const { apps, settings } = store.state;
-  if (indexKey !== apps || indexSettings !== settings) {
-    indexKey = apps;
-    indexSettings = settings;
-    indexedApps = visibleApps(apps, settings);
-    haystacks = new Map();
-    for (const app of indexedApps) {
-      haystacks.set(
-        app.id,
-        [app.name, app.genericName, app.comment, app.group, ...app.keywords]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase(),
-      );
-    }
-  }
-  return { index: haystacks, apps: indexedApps };
-}
-
 /** Local app matches for the search overlay. */
-export function searchApps(query: string): AppTile[] {
+export function searchApps(query: string): AppInfo[] {
   const needle = query.trim().toLowerCase();
   if (needle.length < 1) return [];
-  const { index, apps } = appSearchIndex();
-  const out: AppTile[] = [];
-  for (const app of apps) {
-    if (index.get(app.id)?.includes(needle)) {
-      out.push(app);
-      if (out.length >= 40) break;
-    }
-  }
-  return out;
-}
-
-let catalogKey: MediaItem[] | null = null;
-let catalogLower: [string, MediaItem][] = [];
-
-/** Lowercased catalogue titles, rebuilt only when the catalogue changes. */
-function catalogIndex(): [string, MediaItem][] {
-  const { catalog } = store.state;
-  if (catalogKey !== catalog) {
-    catalogKey = catalog;
-    catalogLower = catalog.map((item): [string, MediaItem] => [item.title.toLowerCase(), item]);
-  }
-  return catalogLower;
+  return visibleApps(store.state.apps, store.state.settings)
+    .filter((app) => {
+      const haystack = [app.name, app.genericName, app.comment, app.group, ...app.keywords]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    })
+    .slice(0, 40);
 }
 
 /** Local cover-art matches so search feels instant before IMDb answers. */
 export function searchCatalog(query: string): MediaItem[] {
   const needle = query.trim().toLowerCase();
   if (needle.length < 2) return [];
-  const out: MediaItem[] = [];
-  for (const [title, item] of catalogIndex()) {
-    if (title.includes(needle)) {
-      out.push(item);
-      if (out.length >= 24) break;
-    }
-  }
-  return out;
+  return store.state.catalog
+    .filter((item) => item.title.toLowerCase().includes(needle))
+    .slice(0, 24);
 }

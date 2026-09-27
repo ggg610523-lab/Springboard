@@ -42,24 +42,21 @@ export function openOverlay(options: OverlayOptions): OverlayHandle {
   const close = (): void => {
     if (closed) return;
     closed = true;
-    // Leave the stack straight away so `closeAllOverlays()` can drain it in a
-    // single pass. The handle used to stay in the stack until the close
-    // animation finished, so `while (stack.length) stack[...].close()` kept
-    // hitting an already-closed top handle and spun forever — a hard freeze of
-    // the whole UI whenever a screen was opened on top of another one.
-    const index = stack.findIndex((handle) => handle.root === root);
-    if (index >= 0) stack.splice(index, 1);
-    // Zones built inside this overlay die with it: ids are reused by the next
-    // sheet, so keeping them would leave the overlay below without a zone.
-    focusEngine.unregisterZonesIn(root);
     root.classList.remove("is-open");
     window.setTimeout(() => {
       root.remove();
       focusEngine.popLayer(layer);
+      const index = stack.findIndex((handle) => handle.root === root);
+      if (index >= 0) stack.splice(index, 1);
+      const previous = stack[index - 1];
+      if (previous) {
+        focusEngine.rebuild(options.returnKey);
+      } else if (options.returnKey) {
+        focusEngine.rebuild(options.returnKey);
+      } else {
+        focusEngine.rebuild();
+      }
       options.onClose?.();
-      // Another overlay opened on top while we faded out: leave its focus
-      // alone. Only hand focus back once the stack is empty again.
-      focusEngine.rebuild(stack.length ? undefined : options.returnKey);
     }, 200);
   };
 
@@ -127,15 +124,13 @@ function iconFrom(name: string): SVGSVGElement {
   // Imported lazily to avoid a circular import at module init time.
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "2");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("stroke-linejoin", "round");
-  // Lucide check / info path data (see icons.ts).
-  svg.innerHTML =
-    name === "check"
-      ? '<path d="M20 6 9 17l-5-5" />'
-      : '<circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />';
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", name === "check" ? "m5 12.5 4.5 4.5L19 7" : "M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Zm0 7.5v5m0-8.6v.1");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "1.8");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
   return svg;
 }

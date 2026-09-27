@@ -6,7 +6,6 @@
  */
 
 import { store } from "./state";
-import { sound } from "./sound";
 import type { Settings } from "./types";
 
 export function hashString(value: string): number {
@@ -38,46 +37,6 @@ const GRADIENTS: [string, string][] = [
 export function washFor(seed: string): { a: string; b: string } {
   const [a, b] = GRADIENTS[hashString(seed) % GRADIENTS.length];
   return { a, b };
-}
-
-/** CSS fallbacks of `#backdrop-wash` (kept in sync with base.css). */
-const WASH_DEFAULT_A = "#1b2a4a";
-const WASH_DEFAULT_B = "#2a1636";
-/** Must match the `opacity 700ms` fade of `#backdrop-wash::after`. */
-const WASH_FADE_MS = 760;
-
-let washCommitTimer: number | null = null;
-
-/**
- * Push new backdrop wash colours with a compositor-only cross-fade.
- *
- * The wash used to be one element whose `background` shorthand was
- * transitioned for 900ms — a full-screen radial-gradient repaint running on
- * the main thread on every focus change. Now the incoming colours land on the
- * top pseudo-layer (`--wash-a-2`/`--wash-b-2`) which fades in via `opacity`
- * alone; when the fade completes the colours are committed to the base layer
- * and the top layer fades back out over identical colours (invisible).
- */
-export function setBodyWash(a: string, b: string): void {
-  const body = document.body;
-  const idle = washCommitTimer === null;
-  if (idle && body.style.getPropertyValue("--wash-a") === a && body.style.getPropertyValue("--wash-b") === b) {
-    return;
-  }
-
-  body.style.setProperty("--wash-a-2", a);
-  body.style.setProperty("--wash-b-2", b);
-  document.getElementById("backdrop-wash")?.classList.add("is-crossfading");
-
-  if (washCommitTimer !== null) window.clearTimeout(washCommitTimer);
-  washCommitTimer = window.setTimeout(() => {
-    washCommitTimer = null;
-    const incomingA = body.style.getPropertyValue("--wash-a-2");
-    const incomingB = body.style.getPropertyValue("--wash-b-2");
-    body.style.setProperty("--wash-a", incomingA || WASH_DEFAULT_A);
-    body.style.setProperty("--wash-b", incomingB || WASH_DEFAULT_B);
-    document.getElementById("backdrop-wash")?.classList.remove("is-crossfading");
-  }, WASH_FADE_MS);
 }
 
 /** Accent colour used for badges and highlights of a specific item. */
@@ -142,27 +101,6 @@ const TILE_SIZES: Record<Settings["tileSize"], number> = {
   large: 210,
 };
 
-/** Matches `--shelf-padding` in tokens.css. */
-const SHELF_PADDING = 46;
-/** Never shrink a tile below this, whatever "Apps per row" asks for. */
-const MIN_TILE = 96;
-
-/**
- * Effective tile width.
- *
- * `tileSize` picks the preferred size and `iconsPerRow` ("Apps per row") caps
- * it so the requested number of tiles actually fits the window — the setting
- * used to be stored and never read, so it did nothing at all.
- */
-function tileSizeFor(settings: Settings): number {
-  const base = TILE_SIZES[settings.tileSize] ?? TILE_SIZES.medium;
-  const perRow = Math.max(1, Math.min(16, settings.iconsPerRow || 7));
-  const gap = Math.max(0, settings.rowSpacing);
-  const usable = window.innerWidth - SHELF_PADDING * 2 - (perRow - 1) * gap;
-  const fit = Math.floor(usable / perRow);
-  return Math.max(MIN_TILE, Math.min(base, fit));
-}
-
 /** Custom backdrop image (Settings → Appearance → Backdrop). */
 function applyBackdropImage(settings: Settings): void {
   const layer = document.getElementById("backdrop-image");
@@ -184,38 +122,23 @@ export function applyTheme(): void {
   const root = document.documentElement;
   root.dataset.theme = settings.theme;
   root.dataset.animations = settings.animations ? "on" : "off";
-  root.dataset.doubleClick = settings.doubleClickToOpen ? "on" : "off";
-  // The "Interface sounds" toggle lives in Settings but was never forwarded to
-  // the sound engine — only Control Centre's "Quiet mode" did that.
-  sound.setEnabled(settings.soundEffects);
   root.style.setProperty("--accent", settings.accent);
   root.style.setProperty("--corner-radius", `${settings.cornerRadius}px`);
   root.style.setProperty("--row-gap", `${settings.rowSpacing}px`);
   root.style.setProperty("--backdrop-blur", `${settings.backgroundBlur}px`);
   root.style.setProperty("--backdrop-dim", (settings.backgroundDim / 100).toFixed(2));
 
-  const size = tileSizeFor(settings);
+  const size = TILE_SIZES[settings.tileSize] ?? TILE_SIZES.medium;
   root.style.setProperty("--tile-size", `${size}px`);
   root.style.setProperty("--poster-width", `${Math.round(size * 1.05)}px`);
 
-  // "solid" pins the wash to black; every other style hands the backdrop back
-  // to the CSS defaults (or the focused item, via `setBodyWash`).
+  const body = document.body;
   if (settings.backgroundStyle === "solid") {
-    setBodyWash("#000000", "#000000");
+    body.style.setProperty("--wash-a", "#000000");
+    body.style.setProperty("--wash-b", "#000000");
   } else {
-    setBodyWash(WASH_DEFAULT_A, WASH_DEFAULT_B);
+    body.style.removeProperty("--wash-a");
+    body.style.removeProperty("--wash-b");
   }
   applyBackdropImage(settings);
-}
-
-/** Re-fit the tiles when the window is resized ("Apps per row" depends on it). */
-if (typeof window !== "undefined") {
-  let resizeTimer: number | null = null;
-  window.addEventListener("resize", () => {
-    if (resizeTimer !== null) window.clearTimeout(resizeTimer);
-    resizeTimer = window.setTimeout(() => {
-      resizeTimer = null;
-      applyTheme();
-    }, 120);
-  });
 }

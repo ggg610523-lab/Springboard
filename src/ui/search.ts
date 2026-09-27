@@ -1,9 +1,8 @@
 import { api } from "../api";
 import { focusEngine, makeFocusable } from "../focus/focus-engine";
-import { searchApps, searchCatalog } from "../layout";
 import { sound } from "../sound";
 import { store } from "../state";
-import type { AppTile, MediaItem } from "../types";
+import type { AppInfo, MediaItem } from "../types";
 import { appTile, mediaTile } from "./tiles";
 import { el, icon } from "./icons";
 import { closeAllOverlays, openOverlay } from "./overlay";
@@ -57,18 +56,14 @@ function paintField(): void {
 
 async function runSearch(): Promise<void> {
   const text = query.trim();
-  // Apps come from the cached haystack index in layout.ts (zero allocations
-  // per keystroke); the local catalogue matches land instantly while the
-  // Rust-side IMDb query is still in flight.
-  const apps = searchApps(text).slice(0, 12);
-  const remote = await api.mediaSearch(text, 16).catch(() => [] as MediaItem[]);
-  const seen = new Set(remote.map((item) => item.id));
-  const local = searchCatalog(text).filter((item) => !seen.has(item.id));
-  const media = [...local, ...remote].slice(0, 16);
+  const [apps, media] = await Promise.all([
+    api.searchApps(text, 12),
+    api.mediaSearch(text, 16).catch(() => [] as MediaItem[]),
+  ]);
   paintResults(apps, media);
 }
 
-function paintResults(apps: AppTile[], media: MediaItem[]): void {
+function paintResults(apps: AppInfo[], media: MediaItem[]): void {
   if (!appsEl || !mediaEl || !emptyEl) return;
   appsEl.replaceChildren();
   mediaEl.replaceChildren();
@@ -140,20 +135,6 @@ function buildKeyboard(): HTMLElement {
   });
 
   const wide = el("div", "keyboard__row");
-  const space = el("button", "key key--wide key--space", "Space");
-  makeFocusable(
-    space,
-    {
-      onFocus: () => sound.focus(),
-      onActivate: () => {
-        sound.select();
-        query += " ";
-        paintField();
-        refresh();
-      },
-    },
-    "kb-space",
-  );
   const del = el("button", "key key--wide", "Delete");
   makeFocusable(
     del,
@@ -182,7 +163,6 @@ function buildKeyboard(): HTMLElement {
     },
     "kb-clear",
   );
-  wide.appendChild(space);
   wide.appendChild(del);
   wide.appendChild(clear);
   keyboard.appendChild(wide);

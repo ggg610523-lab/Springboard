@@ -62,50 +62,19 @@ img {
   filter: blur(var(--backdrop-blur)) saturate(135%);
   opacity: 0;
   transform: scale(1.08);
-  /* `background-image` is not animatable — only the opacity fade runs. */
-  transition: opacity 900ms var(--tv-ease);
+  transition: opacity 900ms var(--tv-ease), background-image 400ms linear;
 }
 
 #backdrop-image.is-visible {
   opacity: 0.5;
 }
 
-/*
- * The wash is drawn on two stacked pseudo-layers: the base layer holds the
- * committed colours, the top layer carries the incoming ones and fades in with
- * `opacity` only (a compositor property). The old rule transitioned the
- * `background` shorthand, which re-painted two full-screen radial gradients on
- * the main thread for 900ms on every focus change. See `setBodyWash()`.
- */
 #backdrop-wash {
-  background: none;
-  opacity: 0.9;
-}
-
-#backdrop-wash::before,
-#backdrop-wash::after {
-  content: "";
-  position: absolute;
-  inset: 0;
   background:
     radial-gradient(120% 90% at 22% 8%, var(--wash-a, #1b2a4a) 0%, transparent 62%),
     radial-gradient(120% 100% at 88% 96%, var(--wash-b, #2a1636) 0%, transparent 58%);
-}
-
-#backdrop-wash::after {
-  background:
-    radial-gradient(120% 90% at 22% 8%, var(--wash-a-2, var(--wash-a, #1b2a4a)) 0%, transparent 62%),
-    radial-gradient(
-      120% 100% at 88% 96%,
-      var(--wash-b-2, var(--wash-b, #2a1636)) 0%,
-      transparent 58%
-    );
-  opacity: 0;
-  transition: opacity 700ms var(--tv-ease);
-}
-
-#backdrop-wash.is-crossfading::after {
-  opacity: 1;
+  opacity: 0.9;
+  transition: background 900ms var(--tv-ease);
 }
 
 #backdrop-vignette {
@@ -231,8 +200,7 @@ img {
   color: var(--label-tertiary);
 }
 
-#hints .hint,
-#hints .hint-chip {
+#hints .hint {
   display: flex;
   align-items: center;
   gap: 7px;

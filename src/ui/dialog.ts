@@ -9,20 +9,6 @@ interface DialogAction {
   onSelect: () => void;
 }
 
-/**
- * Zone ids are unique per sheet instance.
- *
- * Two stacked sheets (an info dialog that opens a "launch?" confirm, for
- * example) used to both register `dialog-actions`; the second registration
- * overwrote the first, so closing the top sheet left the one below with no
- * zone at all and the remote became dead.
- */
-let zoneSeq = 0;
-export function nextZoneId(prefix: string): string {
-  zoneSeq += 1;
-  return `${prefix}-${zoneSeq}`;
-}
-
 interface DialogOptions {
   title: string;
   body?: string;
@@ -70,11 +56,7 @@ export function showDialog(options: DialogOptions): void {
       });
       card.appendChild(actions);
       root.appendChild(card);
-      focusEngine.registerZone(nextZoneId("dialog-actions"), actions, 1);
-      // Sheets with a text field (e.g. the backdrop path prompt) should accept
-      // typing right away instead of requiring a mouse click first.
-      const input = card.querySelector<HTMLInputElement>("input");
-      if (input) requestAnimationFrame(() => input.focus());
+      focusEngine.registerZone("dialog-actions", actions, 1);
     },
   });
 }
@@ -132,7 +114,7 @@ export function showPicker<T>(options: PickerOptions<T>): void {
       });
       card.appendChild(list);
       root.appendChild(card);
-      focusEngine.registerZone(nextZoneId("picker-list"), list, 1);
+      focusEngine.registerZone("picker-list", list, 1);
 
       // Start on the currently selected entry.
       const currentIndex = Math.max(

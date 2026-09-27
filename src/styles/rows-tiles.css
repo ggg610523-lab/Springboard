@@ -8,10 +8,6 @@
 
 .shelf-section {
   min-width: 0;
-  /* Off-screen rows are skipped entirely by the renderer; the intrinsic size
-     keeps the scroll bar stable before a row has ever been painted. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 320px;
 }
 
 /* Visible fallback when booting fails — never a silent black screen. */
@@ -71,10 +67,7 @@
   padding: 16px var(--shelf-padding) 18px;
   overflow-x: auto;
   overflow-y: hidden;
-  /* Painting/layout containment lets the compositor clip this row as a unit;
-     scrolling is driven by the focus engine (`behavior: "smooth"`), so the
-     CSS-level smooth scroll (which double-animated with it) is gone. */
-  contain: layout paint;
+  scroll-behavior: smooth;
   scroll-padding-inline: var(--shelf-padding);
   scrollbar-width: none;
 }
@@ -255,7 +248,7 @@
   height: 22px;
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.55);
-  /* backdrop-filter removed: badges repeat per tile. */
+  backdrop-filter: blur(10px);
   font-size: 11px;
   color: #fff;
 }

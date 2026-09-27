@@ -1,7 +1,6 @@
 import { focusEngine, makeFocusable } from "../focus/focus-engine";
 import { sound } from "../sound";
 import { el, icon } from "./icons";
-import { hasOverlay } from "./overlay";
 
 export interface MenuOption {
   icon: string;
@@ -40,12 +39,9 @@ export function showActionMenu(
     closed = true;
     menu.classList.remove("is-open");
     focusEngine.popLayer(layer);
-    focusEngine.unregisterZonesIn(menu);
     window.setTimeout(() => {
       menu.remove();
-      // If the menu action opened a sheet, that sheet owns focus now; only
-      // hand focus back when nothing else is on screen.
-      focusEngine.rebuild(hasOverlay() ? undefined : returnKey);
+      focusEngine.rebuild(returnKey);
       if (openMenu?.node === menu) openMenu = null;
     }, 170);
   };

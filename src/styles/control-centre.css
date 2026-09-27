@@ -145,14 +145,10 @@
 
 .cc-track__fill {
   height: 100%;
-  width: 100%;
-  /* `scaleX` runs on the compositor; transitioning `width` relaid out the
-     track on every volume tick. JS drives `--fill` (0–1). */
-  transform: scaleX(var(--fill, 0.5));
-  transform-origin: left center;
+  width: 50%;
   background: var(--accent);
   border-radius: 3px;
-  transition: transform var(--tv-dur) var(--tv-ease);
+  transition: width var(--tv-dur) var(--tv-ease);
 }
 
 .cc-row.is-focused .cc-track {

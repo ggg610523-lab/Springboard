@@ -98,14 +98,11 @@
   gap: 9px;
   max-height: 300px;
   overflow: hidden;
-  /* Opacity + transform only: animating `max-height` forced layout on every
-     frame. The collapse itself (max-height → 0) is applied instantly. */
-  transition: opacity var(--tv-dur) var(--tv-ease), transform var(--tv-dur) var(--tv-ease);
+  transition: opacity var(--tv-dur) var(--tv-ease), max-height var(--tv-dur) var(--tv-ease);
 }
 
 .keyboard.is-hidden {
   opacity: 0;
-  transform: translateY(12px);
   max-height: 0;
   pointer-events: none;
 }
@@ -279,29 +276,6 @@
   color: var(--label-secondary);
   margin-bottom: 24px;
   white-space: pre-line;
-}
-
-.dialog__extra {
-  margin-bottom: 24px;
-  width: 100%;
-}
-
-.dialog__input {
-  width: 100%;
-  padding: 12px 16px;
-  border-radius: 10px;
-  border: 1px solid var(--hairline-strong);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--label-primary);
-  font-family: var(--font-ui);
-  font-size: 15px;
-  outline: none;
-  transition: border-color var(--tv-dur-fast) ease, background var(--tv-dur-fast) ease;
-}
-
-.dialog__input:focus {
-  border-color: var(--accent);
-  background: rgba(255, 255, 255, 0.14);
 }
 
 .dialog__actions {

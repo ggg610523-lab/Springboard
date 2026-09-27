@@ -1,8 +1,7 @@
-use crate::model::{Settings, UsageStats};
+use crate::model::{Settings, UsageEntry, UsageStats};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_secs() -> u64 {
@@ -33,26 +32,14 @@ pub fn apps_cache_path() -> PathBuf {
 }
 
 /// Write a file atomically (temp file + rename) so a crash cannot corrupt it.
-///
-/// The staging file gets a process-unique name so two concurrent writers can
-/// never clobber each other, and the write is deliberately *not* fsynced:
-/// settings/usage are saved on a 220 ms debounce, so `sync_all()` would cost a
-/// few milliseconds of disk latency several times a second while a slider is
-/// being dragged, for a file whose worst-case loss is one debounce window.
 pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("{}-{seq}.tmp", std::process::id()));
-    let result = (|| {
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(contents.as_bytes())?;
-        file.flush()?;
-        fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
     }
-    result
+    fs::rename(&tmp, path)
 }
 
 pub fn load_settings() -> Settings {
@@ -85,14 +72,25 @@ pub fn save_usage(usage: &UsageStats) {
 }
 
 /// Record one launch of `id` so "Most Used" / "Recent" rows keep working.
-///
-/// Mutates the caller's copy so the caller can hold the state lock across the
-/// update; the previous version re-read the file from disk on every launch.
-pub fn record_launch(usage: &mut UsageStats, id: &str) {
+pub fn record_launch(id: &str) -> UsageStats {
+    let mut usage = load_usage();
     let entry = usage.apps.entry(id.to_string()).or_default();
     entry.count += 1;
     entry.last_used = now_secs();
-    save_usage(usage);
+    save_usage(&usage);
+    usage
+}
+
+pub fn entry_count(usage: &UsageStats, id: &str) -> u64 {
+    usage.apps.get(id).map(|e: &UsageEntry| e.count).unwrap_or(0)
+}
+
+pub fn entry_last_used(usage: &UsageStats, id: &str) -> u64 {
+    usage
+        .apps
+        .get(id)
+        .map(|e: &UsageEntry| e.last_used)
+        .unwrap_or(0)
 }
 
 /// Enable/disable launching the app on login via a freedesktop autostart file.

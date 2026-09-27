@@ -6,73 +6,43 @@ mod model;
 mod settings;
 mod system;
 
-use model::{AppInfo, AppTile, DirListing, Settings, SystemInfo, UsageStats};
+use model::{AppInfo, DirListing, Settings, SystemInfo, UsageStats};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
-use ts_rs::TS;
 
 /// Shared runtime state for all commands.
-///
-/// The collections sit behind `Arc` so a command can hand out a snapshot
-/// without deep-copying it: a 220-entry app list is ~109 kB of heap that used
-/// to be cloned two or three times per scan.
 pub struct AppState {
-    pub apps: Mutex<Arc<Vec<AppInfo>>>,
+    pub apps: Mutex<Vec<AppInfo>>,
     pub settings: Mutex<Settings>,
     pub usage: Mutex<UsageStats>,
     /// Cached IMDb catalogue used by the recommendation engine.
-    pub catalog: Mutex<Arc<Vec<media::MediaItem>>>,
+    pub catalog: Mutex<Vec<media::MediaItem>>,
     /// Learned taste profile.
-    pub profile: Mutex<Arc<media::UserProfile>>,
+    pub profile: Mutex<media::UserProfile>,
     pub scanning: AtomicBool,
     pub scanned_once: AtomicBool,
     /// Guards against two catalogue syncs at once.
     pub syncing: AtomicBool,
-    /// Bumped by every completed scan so the UI can tell whether the tile list
-    /// it already holds is stale.
-    pub apps_revision: AtomicU64,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
-            apps: Mutex::new(Arc::new(Vec::new())),
+            apps: Mutex::new(Vec::new()),
             settings: Mutex::new(settings::load_settings()),
             usage: Mutex::new(settings::load_usage()),
-            catalog: Mutex::new(Arc::new(media::load_catalog())),
-            profile: Mutex::new(Arc::new(media::load_profile())),
+            catalog: Mutex::new(media::load_catalog()),
+            profile: Mutex::new(media::load_profile()),
             scanning: AtomicBool::new(false),
             scanned_once: AtomicBool::new(false),
             syncing: AtomicBool::new(false),
-            apps_revision: AtomicU64::new(0),
         }
     }
 
     fn settings_snapshot(&self) -> Settings {
         self.settings.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-
-    fn apps_snapshot(&self) -> Arc<Vec<AppInfo>> {
-        self.apps
-            .lock()
-            .map(|list| Arc::clone(&list))
-            .unwrap_or_default()
-    }
-
-    fn catalog_snapshot(&self) -> Arc<Vec<media::MediaItem>> {
-        self.catalog
-            .lock()
-            .map(|list| Arc::clone(&list))
-            .unwrap_or_default()
-    }
-
-    fn profile_snapshot(&self) -> Arc<media::UserProfile> {
-        self.profile
-            .lock()
-            .map(|profile| Arc::clone(&profile))
-            .unwrap_or_default()
     }
 
     fn find_app(&self, id: &str) -> Option<AppInfo> {
@@ -84,7 +54,7 @@ impl AppState {
 }
 
 /// Result of a launch attempt, pushed to the UI through `launch-result`.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LaunchResult {
     id: String,
@@ -94,20 +64,8 @@ struct LaunchResult {
     message: String,
 }
 
-/// Payload for the `apps-scanned` event.
-///
-/// Only the revision and the count travel over IPC. The UI already has the
-/// tile list from `list_apps`, so re-sending the full 109 kB snapshot would be
-/// pure duplication; it re-fetches only when the revision moved on.
-#[derive(Debug, Clone, Copy, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-struct AppsScanned {
-    revision: u64,
-    count: usize,
-}
-
 /// Scan the system and refresh every cached icon reference.
-fn perform_scan(state: &AppState, refresh_icons: bool) -> Arc<Vec<AppInfo>> {
+fn perform_scan(state: &AppState, refresh_icons: bool) -> Vec<AppInfo> {
     if refresh_icons {
         icons::invalidate();
     }
@@ -120,76 +78,51 @@ fn perform_scan(state: &AppState, refresh_icons: bool) -> Arc<Vec<AppInfo>> {
     if let Ok(json) = serde_json::to_string(&list) {
         let _ = settings::write_atomic(&settings::apps_cache_path(), &json);
     }
-    let snapshot = Arc::new(list);
     if let Ok(mut guard) = state.apps.lock() {
-        *guard = Arc::clone(&snapshot);
+        *guard = list.clone();
     }
     state.scanned_once.store(true, Ordering::SeqCst);
-    state.apps_revision.fetch_add(1, Ordering::SeqCst);
-    snapshot
+    list
 }
 
-fn load_cached_apps() -> Arc<Vec<AppInfo>> {
-    Arc::new(
-        std::fs::read_to_string(settings::apps_cache_path())
-            .ok()
-            .and_then(|text| serde_json::from_str::<Vec<AppInfo>>(&text).ok())
-            .unwrap_or_default(),
-    )
-}
-
-/// Project a scan onto the lean wire type the tile grid needs.
-///
-/// `NoDisplay` entries are dropped here rather than in the frontend: they are
-/// 72% of a typical scan and were previously serialised, shipped and thrown
-/// away again on the UI thread.
-fn tiles_from(apps: &[AppInfo], include_hidden: bool) -> Vec<AppTile> {
-    apps.iter()
-        .filter(|app| include_hidden || !app.no_display)
-        .map(AppTile::from)
-        .collect()
+fn load_cached_apps() -> Vec<AppInfo> {
+    std::fs::read_to_string(settings::apps_cache_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<AppInfo>>(&text).ok())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-fn list_apps(
-    state: State<'_, AppState>,
-    force: Option<bool>,
-    include_hidden: Option<bool>,
-) -> Vec<AppTile> {
-    let snapshot = if force.unwrap_or(false) {
-        perform_scan(&state, true)
+fn list_apps(state: State<'_, AppState>, force: Option<bool>) -> Vec<AppInfo> {
+    if force.unwrap_or(false) {
+        return perform_scan(&state, true);
+    }
+    let cached = state.apps.lock().map(|l| l.clone()).unwrap_or_default();
+    if cached.is_empty() {
+        perform_scan(&state, false)
     } else {
-        let cached = state.apps_snapshot();
-        if cached.is_empty() {
-            perform_scan(&state, false)
-        } else {
-            cached
-        }
+        cached
+    }
+}
+
+#[tauri::command]
+fn rescan_apps(state: State<'_, AppState>) -> Vec<AppInfo> {
+    perform_scan(&state, true)
+}
+
+/// Start a real application. Returns immediately; the outcome is reported
+/// through the `launch-result` event so the UI never blocks.
+#[tauri::command]
+fn launch_app(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<String, String> {
+    let Some(entry) = state.find_app(&id) else {
+        return Err(format!("Unknown application: {id}"));
     };
-    tiles_from(&snapshot, include_hidden.unwrap_or(false))
-}
-
-#[tauri::command]
-fn rescan_apps(state: State<'_, AppState>, include_hidden: Option<bool>) -> Vec<AppTile> {
-    let snapshot = perform_scan(&state, true);
-    tiles_from(&snapshot, include_hidden.unwrap_or(false))
-}
-
-/// Full desktop-entry record for the details sheet (`id`, `exec`, categories…).
-#[tauri::command]
-fn app_details(state: State<'_, AppState>, id: String) -> Option<AppInfo> {
-    state.find_app(&id)
-}
-
-/// Current revision of the scanned app list.
-#[tauri::command]
-fn apps_revision(state: State<'_, AppState>) -> u64 {
-    state.apps_revision.load(Ordering::SeqCst)
-}
-
-/// Detach a launch attempt so the UI never blocks on it; the outcome arrives
-/// through the `launch-result` event.
-fn spawn_launch(handle: tauri::AppHandle, entry: AppInfo) {
+    let usage = settings::record_launch(&id);
+    if let Ok(mut guard) = state.usage.lock() {
+        *guard = usage;
+    }
+    let display_name = entry.name.clone();
+    let handle = app.clone();
     std::thread::spawn(move || {
         let result = match launcher::launch(&entry) {
             Ok(method) => LaunchResult {
@@ -209,45 +142,38 @@ fn spawn_launch(handle: tauri::AppHandle, entry: AppInfo) {
         };
         let _ = handle.emit("launch-result", result);
     });
-}
-
-/// Start a real application. Returns immediately; the outcome is reported
-/// through the `launch-result` event so the UI never blocks.
-#[tauri::command]
-fn launch_app(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<String, String> {
-    let Some(entry) = state.find_app(&id) else {
-        return Err(format!("Unknown application: {id}"));
-    };
-    // Record against the in-memory usage under one lock instead of re-reading
-    // and re-parsing usage.json on every launch.
-    if let Ok(mut usage) = state.usage.lock() {
-        settings::record_launch(&mut usage, &id);
-    }
-    let display_name = entry.name.clone();
-    spawn_launch(app, entry);
     Ok(display_name)
 }
 
 /// Launch any `.desktop` file on disk (used by the file browser).
 #[tauri::command]
-fn launch_desktop_file(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<String, String> {
-    // Look the entry up in the cached scan: a fresh `scan_apps()` would cost
-    // hundreds of file reads and `$PATH` probes to find a single record.
-    let entry = state
-        .apps_snapshot()
-        .iter()
+fn launch_desktop_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    let list = apps::scan_apps();
+    let entry = list
+        .into_iter()
         .find(|a| a.desktop_file == path)
-        .cloned()
         .ok_or_else(|| format!("No launchable application at {path}"))?;
-    if let Ok(mut usage) = state.usage.lock() {
-        settings::record_launch(&mut usage, &entry.id);
-    }
     let display_name = entry.name.clone();
-    spawn_launch(app, entry);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let result = match launcher::launch(&entry) {
+            Ok(method) => LaunchResult {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                ok: true,
+                method,
+                message: format!("Opening {}", entry.name),
+            },
+            Err(message) => LaunchResult {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                ok: false,
+                method: "none".into(),
+                message,
+            },
+        };
+        let _ = handle.emit("launch-result", result);
+    });
     Ok(display_name)
 }
 
@@ -328,8 +254,8 @@ fn home_directory() -> String {
         .unwrap_or_default()
 }
 
-/// Read the system volume / mute state and mirror it into the settings cache.
-fn read_audio(state: &AppState) -> (Option<u32>, Option<bool>) {
+#[tauri::command]
+fn get_audio(state: State<'_, AppState>) -> (Option<u32>, Option<bool>) {
     let volume = system::get_volume();
     let muted = system::get_muted();
     if let Some(v) = volume {
@@ -341,35 +267,20 @@ fn read_audio(state: &AppState) -> (Option<u32>, Option<bool>) {
 }
 
 #[tauri::command]
-fn get_audio(state: State<'_, AppState>) -> (Option<u32>, Option<bool>) {
-    read_audio(&state)
-}
-
-/// Outcome of an audio action, including the resulting state.
-#[derive(Debug, Clone, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-struct AudioCommandResult {
-    volume: Option<u32>,
-    muted: Option<bool>,
-    message: String,
-}
-
-/// Apply an audio action and return the new `(volume, muted)` alongside the
-/// message, so the UI does not need a follow-up `get_audio` (which itself
-/// spawns two more mixer probes) just to learn what changed.
-#[tauri::command]
 fn audio_command(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     action: String,
     value: Option<i64>,
-) -> Result<AudioCommandResult, String> {
-    let message = system::system_action(&action, value)?;
-    let (volume, muted) = read_audio(&state);
-    Ok(AudioCommandResult {
-        volume,
-        muted,
-        message,
-    })
+) -> Result<String, String> {
+    let outcome = system::system_action(&action, value)?;
+    if let Some(volume) = system::get_volume() {
+        if let Ok(mut guard) = state.settings.lock() {
+            guard.volume = volume;
+        }
+    }
+    let _ = app;
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -390,80 +301,36 @@ fn selected_genres(state: &AppState) -> Option<Vec<String>> {
 }
 
 fn recall(state: &AppState, limit: usize, salt: f64) -> Vec<media::MediaItem> {
-    // Both snapshots are refcount bumps, not deep copies.
-    let catalog = state.catalog_snapshot();
-    let profile = state.profile_snapshot();
+    let catalog = state.catalog.lock().map(|c| c.clone()).unwrap_or_default();
+    let profile = state.profile.lock().map(|p| p.clone()).unwrap_or_default();
     media::recommendations(&catalog, &profile, limit, salt)
 }
 
-/// Everything the home screen needs from the engine, in one round trip.
-#[derive(Debug, Clone, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-struct MediaBootstrap {
-    #[ts(as = "Vec<media::MediaItem>")]
-    catalog: Arc<Vec<media::MediaItem>>,
-    #[ts(as = "media::UserProfile")]
-    profile: Arc<media::UserProfile>,
-    recommendations: Vec<media::MediaItem>,
-    status: media::MediaStatus,
-}
-
 /// Load the cached catalogue, optionally re-syncing it from IMDb.
-async fn load_catalog(
-    state: &AppState,
-    refresh: bool,
-) -> Result<Arc<Vec<media::MediaItem>>, String> {
-    if !refresh {
-        let cached = state.catalog_snapshot();
+#[tauri::command]
+async fn media_catalog(
+    state: State<'_, AppState>,
+    refresh: Option<bool>,
+) -> Result<Vec<media::MediaItem>, String> {
+    if !refresh.unwrap_or(false) {
+        let cached = state.catalog.lock().map(|c| c.clone()).unwrap_or_default();
         if !cached.is_empty() {
             return Ok(cached);
         }
     }
     if state.syncing.swap(true, Ordering::SeqCst) {
-        return Ok(state.catalog_snapshot());
+        return Ok(state.catalog.lock().map(|c| c.clone()).unwrap_or_default());
     }
-    let genres = selected_genres(state);
+    let genres = selected_genres(&state);
     let result =
         tauri::async_runtime::spawn_blocking(move || media::build_catalog(genres.as_deref())).await;
     state.syncing.store(false, Ordering::SeqCst);
     let items = result.map_err(|e| e.to_string())??;
     media::mark_sync();
-    let snapshot = Arc::new(items);
     if let Ok(mut guard) = state.catalog.lock() {
-        *guard = Arc::clone(&snapshot);
+        *guard = items.clone();
     }
-    Ok(snapshot)
-}
-
-/// Catalogue + profile + first ranking + engine status.
-///
-/// The UI used to issue four separate invokes for this, which meant four IPC
-/// round trips and four lock acquisitions on the very first paint.
-#[tauri::command]
-async fn media_bootstrap(
-    state: State<'_, AppState>,
-    limit: Option<usize>,
-    salt: Option<f64>,
-) -> Result<MediaBootstrap, String> {
-    let catalog = load_catalog(&state, false).await?;
-    let profile = state.profile_snapshot();
-    let status = media::status(catalog.len(), &profile);
-    let recommendations =
-        media::recommendations(&catalog, &profile, limit.unwrap_or(14), salt.unwrap_or(0.0));
-    Ok(MediaBootstrap {
-        catalog,
-        profile,
-        recommendations,
-        status,
-    })
-}
-
-#[tauri::command]
-async fn media_catalog(
-    state: State<'_, AppState>,
-    refresh: Option<bool>,
-) -> Result<Arc<Vec<media::MediaItem>>, String> {
-    load_catalog(&state, refresh.unwrap_or(false)).await
+    Ok(items)
 }
 
 /// Ranked recommendations for the shelves.
@@ -489,34 +356,32 @@ async fn media_search(
     if needle.len() < 2 {
         return Ok(Vec::new());
     }
-    let catalog = state.catalog_snapshot();
-    let mut results: Vec<media::MediaItem> = catalog
-        .iter()
-        .filter(|item| item.title.to_lowercase().contains(&needle))
-        .cloned()
-        .collect();
-    let mut seen: std::collections::HashSet<String> =
-        results.iter().map(|item| item.id.clone()).collect();
-
+    let mut results: Vec<media::MediaItem> = {
+        let catalog = state.catalog.lock().map(|c| c.clone()).unwrap_or_default();
+        catalog
+            .into_iter()
+            .filter(|item| item.title.to_lowercase().contains(&needle))
+            .collect()
+    };
     let remote_query = query.clone();
     let remote = tauri::async_runtime::spawn_blocking(move || media::search_imdb(&remote_query, ""))
         .await
         .map_err(|e| e.to_string())?;
     if let Ok(mut list) = remote {
         for item in list.drain(..) {
-            if seen.insert(item.id.clone()) {
+            if !results.iter().any(|existing| existing.id == item.id) {
                 results.push(item);
             }
         }
     }
     results.truncate(limit);
     if let Ok(mut profile) = state.profile.lock() {
-        media::remember_search(Arc::make_mut(&mut profile), &query);
+        media::remember_search(&mut profile, &query);
     }
     Ok(results)
 }
     /// Result of one interaction with a poster.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MediaFeedbackResult {
     recommendations: Vec<media::MediaItem>,
@@ -533,60 +398,53 @@ fn media_feedback(
     limit: Option<usize>,
     salt: Option<f64>,
 ) -> Result<MediaFeedbackResult, String> {
-    // One lock, one mutation, one save: this used to take the profile lock
-    // three times and the catalogue lock twice.
     {
         let mut profile = state
             .profile
             .lock()
             .map_err(|_| "profile lock poisoned".to_string())?;
-        media::apply_feedback(Arc::make_mut(&mut profile), &item.id, &action, &item.genre)?;
-        media::save_profile(&profile);
+        media::apply_feedback(&mut profile, &item.id, &action, &item.genre)?;
     }
     // A liked search result becomes part of the catalogue so it can resurface.
     if action == "like" {
-        let mut catalog = state
-            .catalog
-            .lock()
-            .map_err(|_| "catalog lock poisoned".to_string())?;
-        if !catalog.iter().any(|existing| existing.id == item.id) {
-            let mut saved = item.clone();
-            if saved.genre.trim().is_empty() {
-                saved.genre = "Saved".into();
+        if let Ok(mut catalog) = state.catalog.lock() {
+            if !catalog.iter().any(|existing| existing.id == item.id) {
+                let mut saved = item.clone();
+                if saved.genre.trim().is_empty() {
+                    saved.genre = "Saved".into();
+                }
+                catalog.push(saved);
+                media::save_catalog(&catalog);
             }
-            let list = Arc::make_mut(&mut catalog);
-            list.push(saved);
-            media::save_catalog(list);
         }
     }
-    let catalog_size = state.catalog_snapshot().len();
-    let recommendations = recall(&state, limit.unwrap_or(14), salt.unwrap_or(0.0));
-    let profile = state.profile_snapshot();
+    let catalog_size = state.catalog.lock().map(|c| c.len()).unwrap_or(0);
+    let profile = state.profile.lock().map(|p| p.clone()).unwrap_or_default();
     Ok(MediaFeedbackResult {
-        recommendations,
-        profile: profile.as_ref().clone(),
+        recommendations: recall(&state, limit.unwrap_or(14), salt.unwrap_or(0.0)),
+        profile,
         catalog_size,
     })
 }
 
 #[tauri::command]
-fn media_profile(state: State<'_, AppState>) -> Arc<media::UserProfile> {
-    state.profile_snapshot()
+fn media_profile(state: State<'_, AppState>) -> media::UserProfile {
+    state.profile.lock().map(|p| p.clone()).unwrap_or_default()
 }
 
 #[tauri::command]
 fn media_reset_profile(state: State<'_, AppState>) -> media::UserProfile {
     let fresh = media::reset_profile();
     if let Ok(mut guard) = state.profile.lock() {
-        *guard = Arc::new(fresh.clone());
+        *guard = fresh.clone();
     }
     fresh
 }
 
 #[tauri::command]
 fn media_status(state: State<'_, AppState>) -> media::MediaStatus {
-    let catalog_len = state.catalog_snapshot().len();
-    let profile = state.profile_snapshot();
+    let catalog_len = state.catalog.lock().map(|c| c.len()).unwrap_or(0);
+    let profile = state.profile.lock().map(|p| p.clone()).unwrap_or_default();
     media::status(catalog_len, &profile)
 }
 
@@ -615,20 +473,12 @@ fn media_open(id: String) -> Result<(), String> {
 /// Entry point, also used by `main.rs`.
 pub fn run() {
     tauri::Builder::default()
-        // Both protocols read from disk (and `poster://` may shell out to curl),
-        // so they run on the runtime's blocking pool: bounded, reused threads
-        // instead of one new OS thread per image request.
-        .register_asynchronous_uri_scheme_protocol("appicon", |_ctx, request, responder| {
-            let uri = request.uri().to_string();
-            tauri::async_runtime::spawn_blocking(move || {
-                responder.respond(icons::protocol_response(&uri));
-            });
+        .register_uri_scheme_protocol("appicon", |_ctx, request| {
+            icons::protocol_response(&request.uri().to_string())
         })
         .register_asynchronous_uri_scheme_protocol("poster", |_ctx, request, responder| {
             let uri = request.uri().to_string();
-            tauri::async_runtime::spawn_blocking(move || {
-                responder.respond(media::poster_response(&uri));
-            });
+            std::thread::spawn(move || responder.respond(media::poster_response(&uri)));
         })
         .manage(AppState::new())
         .setup(|app| {
@@ -650,18 +500,12 @@ pub fn run() {
                 }
             }
 
-            // The scan reads hundreds of desktop files and probes `$PATH`;
-            // running it on the async runtime would starve every other command.
-            tauri::async_runtime::spawn_blocking(move || {
-                let (revision, count) = {
+            tauri::async_runtime::spawn(async move {
+                let list = {
                     let state = handle.state::<AppState>();
-                    let snapshot = perform_scan(&state, true);
-                    (
-                        state.apps_revision.load(Ordering::SeqCst),
-                        snapshot.len(),
-                    )
+                    perform_scan(&state, true)
                 };
-                let _ = handle.emit("apps-scanned", AppsScanned { revision, count });
+                let _ = handle.emit("apps-scanned", list);
             });
             Ok(())
         })
@@ -673,8 +517,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_apps,
             rescan_apps,
-            app_details,
-            apps_revision,
             launch_app,
             launch_desktop_file,
             get_settings,
@@ -689,7 +531,6 @@ pub fn run() {
             get_audio,
             audio_command,
             quit_launcher,
-            media_bootstrap,
             media_catalog,
             media_recommendations,
             media_search,
@@ -703,66 +544,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Apple TV launcher");
-}
-/// Regenerates `src/generated.ts` — the TypeScript wire types the frontend
-/// imports from `src/types.ts`.
-///
-/// Run `cargo test export_typescript` after changing any struct that crosses
-/// IPC (or is emitted through the `appicon://` / `poster://` protocols). The
-/// generated file is committed so the webview build never needs a Rust toolchain.
-#[cfg(test)]
-mod export_typescript {
-    use ts_rs::TS;
-
-    #[test]
-    fn export() {
-        let mut out = String::from(
-            "/* AUTO-GENERATED from the Rust wire structs by\n\
-             * `cargo test export_typescript` (src-tauri/src/lib.rs).\n\
-             * Do not edit by hand — change the Rust struct instead. */\n\n",
-        );
-
-        macro_rules! emit {
-            ($($t:ty),* $(,)?) => {
-                $(
-                    let decl = <$t as TS>::decl();
-                    let decl = decl.trim();
-                    if let Some(rest) = decl.strip_prefix("export ") {
-                        out.push_str("export ");
-                        out.push_str(rest);
-                    } else {
-                        out.push_str("export ");
-                        out.push_str(decl);
-                    }
-                    out.push_str("\n\n");
-                )*
-            };
-        }
-
-        emit!(
-            // IPC commands + events (crate root).
-            crate::LaunchResult,
-            crate::AppsScanned,
-            crate::AudioCommandResult,
-            crate::MediaBootstrap,
-            crate::MediaFeedbackResult,
-            // Application model.
-            crate::model::AppInfo,
-            crate::model::AppTile,
-            crate::model::RowDef,
-            crate::model::UsageEntry,
-            crate::model::UsageStats,
-            crate::model::Settings,
-            crate::model::SystemInfo,
-            crate::model::DirEntryInfo,
-            crate::model::DirListing,
-            // Recommendation engine.
-            crate::media::MediaItem,
-            crate::media::UserProfile,
-            crate::media::MediaStatus,
-        );
-
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../src/generated.ts");
-        std::fs::write(path, &out).expect("failed to write src/generated.ts");
-    }
 }

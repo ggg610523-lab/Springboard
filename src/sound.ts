@@ -7,15 +7,6 @@ class SoundEngine {
   private context: AudioContext | null = null;
   private enabled = true;
   private lastPlayed = 0;
-  /**
-   * Pre-rendered noise bursts keyed by duration.
-   *
-   * A click used to allocate + fill a fresh 1.3k-sample AudioBuffer on every
-   * key press (~5 kB of garbage per arrow press while holding a key). The
-   * waveform only depends on the duration, so each shape is rendered once and
-   * replayed through a fresh source node.
-   */
-  private noiseCache = new Map<number, AudioBuffer>();
 
   setEnabled(value: boolean): void {
     this.enabled = value;
@@ -48,15 +39,11 @@ class SoundEngine {
     this.lastPlayed = now;
 
     const frames = Math.max(1, Math.floor(ctx.sampleRate * duration));
-    let buffer = this.noiseCache.get(frames);
-    if (!buffer) {
-      buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < frames; i += 1) {
-        const decay = Math.pow(1 - i / frames, 2.6);
-        data[i] = (Math.random() * 2 - 1) * decay;
-      }
-      this.noiseCache.set(frames, buffer);
+    const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frames; i += 1) {
+      const decay = Math.pow(1 - i / frames, 2.6);
+      data[i] = (Math.random() * 2 - 1) * decay;
     }
     const source = ctx.createBufferSource();
     source.buffer = buffer;

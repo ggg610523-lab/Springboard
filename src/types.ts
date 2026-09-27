@@ -3,55 +3,25 @@
  * wire format produced by `serde(rename_all = "camelCase")`.
  */
 
-/**
- * Lean tile record returned by `list_apps` / `rescan_apps`.
- *
- * The grid only needs enough to draw a tile and classify it. The heavyweight
- * desktop-entry fields live on {@link AppInfo} and are fetched on demand.
- */
-export interface AppTile {
+export interface AppInfo {
   id: string;
   name: string;
   genericName: string | null;
   comment: string | null;
+  exec: string;
   iconPath: string | null;
   iconName: string | null;
-  /** Kept on the tile: the local search matches against it. */
+  categories: string[];
   keywords: string[];
-  group: string;
+  terminal: boolean;
+  desktopFile: string;
   isFlatpak: boolean;
   isSnap: boolean;
+  startupWmClass: string | null;
+  noDisplay: boolean;
+  group: string;
   /** Android app running under Waydroid (e.g. Netflix, Disney+). */
   isWaydroid: boolean;
-  noDisplay: boolean;
-}
-
-/**
- * Full desktop-entry record, returned by `app_details`. Only the details sheet
- * needs this, so it never travels with the home screen payload.
- */
-export interface AppInfo extends AppTile {
-  /** Raw `Exec=` value including field codes. */
-  exec: string;
-  categories: string[];
-  terminal: boolean;
-  /** Absolute path of the `.desktop` file itself. */
-  desktopFile: string;
-  startupWmClass: string | null;
-}
-
-/** Payload of the `apps-scanned` event: a revision, not the whole list. */
-export interface AppsScanned {
-  /** Bumped by every completed scan; the UI refetches only when it moves. */
-  revision: number;
-  count: number;
-}
-
-/** Result of `audio_command`, carrying the post-action mixer state. */
-export interface AudioCommandResult {
-  volume: number | null;
-  muted: boolean | null;
-  message: string;
 }
 
 export interface UsageEntry {
@@ -219,14 +189,6 @@ export interface MediaFeedbackResult {
   recommendations: MediaItem[];
   profile: UserProfile;
   catalogSize: number;
-}
-
-/** Everything the home screen needs from the engine, in one round trip. */
-export interface MediaBootstrap {
-  catalog: MediaItem[];
-  profile: UserProfile;
-  recommendations: MediaItem[];
-  status: MediaStatus;
 }
 
 /** A focusable target understood by the focus engine. */
