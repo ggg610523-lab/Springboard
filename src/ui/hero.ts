@@ -1,16 +1,16 @@
 import { iconUrl, posterUrl } from "../api";
 import { focusEngine, makeFocusable } from "../focus/focus-engine";
-import { washFor } from "../palette";
+import { setBodyWash, washFor } from "../palette";
 import { sound } from "../sound";
-import { actions, store } from "../state";
-import type { AppInfo, MediaItem } from "../types";
+import { actions, mediaById, store } from "../state";
+import type { AppTile, MediaItem } from "../types";
 import { el, icon } from "./icons";
 import { launchApp, mediaFeedback, openAppMenu, openMedia } from "./tiles";
 import { toast } from "./overlay";
 
 interface HeroState {
   mode: "featured" | "app" | "media";
-  app?: AppInfo;
+  app?: AppTile;
   item?: MediaItem;
   index: number;
   /** True while focus lives inside the hero, so the content stays put. */
@@ -48,6 +48,56 @@ function fallbackPoster(item: MediaItem): HTMLElement {
   node.style.setProperty("--wash-b", wash.b);
   node.appendChild(el("span", undefined, item.title));
   return node;
+}
+
+/**
+ * Reusable hero artwork, keyed by URL.
+ *
+ * The Top Shelf rebuilds its subtree on every focus change and every rotation
+ * tick; making a fresh `<img>` for a poster WebKit had already decoded forced
+ * a re-decode each time. Art is stashed by URL when the subtree is swapped
+ * and moved back in when the same title comes around, so the 9s rotation loop
+ * reuses the same handful of nodes forever. The error listener is attached
+ * once at creation and resolves its fallback from `parentElement` at fire
+ * time — a URL always maps to the same title, so the closure stays valid.
+ */
+const artPool = new Map<string, HTMLImageElement>();
+const ART_POOL_LIMIT = 8;
+
+function takeArt(src: string, alt: string, buildFallback: () => HTMLElement): HTMLImageElement {
+  const hit = artPool.get(src);
+  if (hit) {
+    artPool.delete(src);
+    hit.remove();
+    hit.alt = alt;
+    return hit;
+  }
+  const img = el("img");
+  img.dataset.artKey = src;
+  img.src = src;
+  img.alt = alt;
+  img.decoding = "async";
+  img.addEventListener("error", () => {
+    const parent = img.parentElement;
+    img.remove();
+    if (parent && !parent.firstElementChild) parent.appendChild(buildFallback());
+  });
+  return img;
+}
+
+function stashArt(img: HTMLImageElement): void {
+  const key = img.dataset.artKey;
+  if (!key) return;
+  img.remove();
+  // Re-insert to mark it as the most recently used; Map preserves order, so
+  // eviction below drops the least recently stashed artwork first.
+  artPool.delete(key);
+  artPool.set(key, img);
+  while (artPool.size > ART_POOL_LIMIT) {
+    const oldest = artPool.keys().next();
+    if (oldest.done) break;
+    artPool.delete(oldest.value);
+  }
 }
 
 function pill(
@@ -96,15 +146,14 @@ function metaLine(item: MediaItem): HTMLElement {
   return meta;
 }
 
-function renderAppHero(container: HTMLElement, app: AppInfo): void {
+function renderAppHero(container: HTMLElement, app: AppTile): void {
   const hero = el("div", "hero");
   const art = el("div", "hero-art hero-art--app");
   const src = iconUrl(app.iconName, app.iconPath);
   if (src) {
-    const img = el("img");
-    img.src = src;
-    img.alt = app.name;
-    art.appendChild(img);
+    art.appendChild(
+      takeArt(src, app.name, () => el("div", "tile-art__fallback", app.name.slice(0, 2).toUpperCase())),
+    );
   } else {
     art.appendChild(el("div", "tile-art__fallback", app.name.slice(0, 2).toUpperCase()));
   }
@@ -118,7 +167,6 @@ function renderAppHero(container: HTMLElement, app: AppInfo): void {
   meta.appendChild(
     el("span", "hero-badge", app.isFlatpak ? "Flatpak" : app.isSnap ? "Snap" : "Native"),
   );
-  if (app.terminal) meta.appendChild(el("span", "hero-badge", "Terminal"));
   if (app.genericName) meta.appendChild(el("span", undefined, app.genericName));
   const usage = store.state.usage.apps[app.id];
   if (usage && usage.count > 0) {
@@ -150,8 +198,7 @@ function renderAppHero(container: HTMLElement, app: AppInfo): void {
   container.appendChild(hero);
 
   const wash = washFor(app.id);
-  document.body.style.setProperty("--wash-a", wash.a);
-  document.body.style.setProperty("--wash-b", wash.b);
+  setBodyWash(wash.a, wash.b);
   backdrop(src);
   focusEngine.registerZone("topshelf", actionsRow, 1);
 }
@@ -166,14 +213,7 @@ function renderFeatured(container: HTMLElement, items: MediaItem[], index: numbe
   const art = el("div", "hero-art");
   const src = posterUrl(item);
   if (src) {
-    const img = el("img");
-    img.src = src;
-    img.alt = item.title;
-    img.addEventListener("error", () => {
-      img.remove();
-      art.appendChild(fallbackPoster(item));
-    });
-    art.appendChild(img);
+    art.appendChild(takeArt(src, item.title, () => fallbackPoster(item)));
   } else {
     art.appendChild(fallbackPoster(item));
   }
@@ -224,8 +264,7 @@ function renderFeatured(container: HTMLElement, items: MediaItem[], index: numbe
   }
 
   const wash = washFor(item.genre || item.title);
-  document.body.style.setProperty("--wash-a", wash.a);
-  document.body.style.setProperty("--wash-b", wash.b);
+  setBodyWash(wash.a, wash.b);
   backdrop(src);
   focusEngine.registerZone("topshelf", actionsRow, 1);
 }
@@ -235,14 +274,7 @@ function renderMediaHero(container: HTMLElement, item: MediaItem): void {
   const art = el("div", "hero-art");
   const src = posterUrl(item);
   if (src) {
-    const img = el("img");
-    img.src = src;
-    img.alt = item.title;
-    img.addEventListener("error", () => {
-      img.remove();
-      art.appendChild(fallbackPoster(item));
-    });
-    art.appendChild(img);
+    art.appendChild(takeArt(src, item.title, () => fallbackPoster(item)));
   } else {
     art.appendChild(fallbackPoster(item));
   }
@@ -302,8 +334,7 @@ function renderMediaHero(container: HTMLElement, item: MediaItem): void {
   container.appendChild(hero);
 
   const wash = washFor(item.genre || item.title);
-  document.body.style.setProperty("--wash-a", wash.a);
-  document.body.style.setProperty("--wash-b", wash.b);
+  setBodyWash(wash.a, wash.b);
   backdrop(src);
   focusEngine.registerZone("topshelf", actionsRow, 1);
 }
@@ -354,8 +385,12 @@ function renderBrandHero(container: HTMLElement): void {
 export function renderHero(): void {
   const container = document.getElementById("top-shelf");
   if (!container) return;
+  const focused = focusEngine.focused;
+  const hadFocus = focused ? container.contains(focused) : false;
+  const focusKey = focused ? focusEngine.handlersFor(focused)?.key : undefined;
   if (!store.state.settings.showTopShelf) {
     container.replaceChildren();
+    if (hadFocus) focusEngine.rebuild(focusKey);
     return;
   }
   const next = el("div", "topshelf-inner");
@@ -368,7 +403,12 @@ export function renderHero(): void {
     if (items.length) renderFeatured(next, items, state.index);
     else renderBrandHero(next);
   }
+  // Park the outgoing artwork in the reuse pool before it is detached.
+  for (const img of container.querySelectorAll<HTMLImageElement>("img")) stashArt(img);
   container.replaceChildren(...next.childNodes);
+  // The pills inside the hero were rebuilt: put the remote back on the same
+  // one instead of dropping focus on the floor.
+  if (hadFocus) focusEngine.rebuild(focusKey);
 }
 
 /** Keep the Top Shelf in sync with whatever tile is focused. */
@@ -391,16 +431,26 @@ export function setHeroForElement(element: HTMLElement | null): void {
   }
   const mediaId = element?.dataset.mediaId;
   if (mediaId) {
-    const item = [...store.state.recommendations, ...store.state.catalog].find(
-      (entry) => entry.id === mediaId,
-    );
+    // Cached id → item map; avoids merging two arrays on every focus change.
+    const item = mediaById().get(mediaId);
     if (item) {
       if (state.mode === "media" && state.item?.id === item.id) return;
       state.mode = "media";
       state.item = item;
       state.app = undefined;
       renderHero();
+      return;
     }
+  }
+  // Focus sits on the tab bar (or nowhere): hand the Top Shelf back to the
+  // featured carousel. It used to stay frozen on the last tile's hero for the
+  // rest of the session, so the rotation only ever ran at boot.
+  if (state.mode !== "featured") {
+    state.mode = "featured";
+    state.app = undefined;
+    state.item = undefined;
+    state.pinned = false;
+    renderHero();
   }
 }
 
@@ -422,8 +472,12 @@ export function startHeroRotation(): void {
   rotateTimer = window.setInterval(() => {
     const items = featuredItems();
     if (state.mode !== "featured" || items.length < 2) return;
-    const inHero = focusEngine.focused?.closest("#top-shelf") != null;
-    if (!inHero) return;
+    // Only cycle while the hero is *not* the focused region. The old check was
+    // inverted: it rotated exactly while the remote sat on the hero's pills
+    // (rebuilding the content underneath the focused element) and froze the
+    // featured row while you were browsing the top bar — the one moment the
+    // featured hero is on screen and should be moving.
+    if (focusEngine.focused?.closest("#top-shelf")) return;
     state.index = (state.index + 1) % items.length;
     renderHero();
   }, seconds * 1000);

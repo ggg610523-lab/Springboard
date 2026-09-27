@@ -2,8 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
+  AppsScanned,
+  AppTile,
+  AudioCommandResult,
   DirListing,
   LaunchResult,
+  MediaBootstrap,
   MediaFeedbackResult,
   MediaItem,
   MediaStatus,
@@ -15,8 +19,17 @@ import type {
 
 /** Thin typed wrappers around the Rust commands. */
 export const api = {
-  listApps: (force = false) => invoke<AppInfo[]>("list_apps", { force }),
-  rescanApps: () => invoke<AppInfo[]>("rescan_apps"),
+  /**
+   * Home screen tiles. `includeHidden` opts into `NoDisplay` entries; they are
+   * filtered in Rust so the 72% of a typical scan the grid never shows does not
+   * cross the IPC boundary at all.
+   */
+  listApps: (force = false, includeHidden = false) =>
+    invoke<AppTile[]>("list_apps", { force, includeHidden }),
+  rescanApps: (includeHidden = false) => invoke<AppTile[]>("rescan_apps", { includeHidden }),
+  /** Full desktop-entry record, fetched only for the details sheet. */
+  appDetails: (id: string) => invoke<AppInfo | null>("app_details", { id }),
+  appsRevision: () => invoke<number>("apps_revision"),
 
   launchApp: (id: string) => invoke<string>("launch_app", { id }),
   launchDesktopFile: (path: string) => invoke<string>("launch_desktop_file", { path }),
@@ -36,17 +49,22 @@ export const api = {
   homeDirectory: () => invoke<string>("home_directory"),
 
   getAudio: () => invoke<[number | null, boolean | null]>("get_audio"),
+  /** Applies the action and returns the new state, so no follow-up read is needed. */
   audioCommand: (action: string, value?: number) =>
-    invoke<string>("audio_command", { action, value: value ?? null }),
+    invoke<AudioCommandResult>("audio_command", { action, value: value ?? null }),
 
   quit: () => invoke<void>("quit_launcher"),
 
   onLaunchResult: (handler: (result: LaunchResult) => void): Promise<UnlistenFn> =>
     listen<LaunchResult>("launch-result", (event) => handler(event.payload)),
-  onAppsScanned: (handler: (apps: AppInfo[]) => void): Promise<UnlistenFn> =>
-    listen<AppInfo[]>("apps-scanned", (event) => handler(event.payload)),
+  /** Carries a revision only; refetch the tiles when it moves. */
+  onAppsScanned: (handler: (payload: AppsScanned) => void): Promise<UnlistenFn> =>
+    listen<AppsScanned>("apps-scanned", (event) => handler(event.payload)),
 
   // ── Recommendation engine ────────────────────────────────────────────────
+  /** Catalogue + profile + first ranking + status in a single round trip. */
+  mediaBootstrap: (limit?: number, salt?: number) =>
+    invoke<MediaBootstrap>("media_bootstrap", { limit: limit ?? null, salt: salt ?? null }),
   mediaCatalog: (refresh = false) => invoke<MediaItem[]>("media_catalog", { refresh }),
   mediaRecommendations: (limit?: number, salt?: number) =>
     invoke<MediaItem[]>("media_recommendations", { limit: limit ?? null, salt: salt ?? null }),
@@ -65,23 +83,7 @@ export const api = {
   mediaGenreSeeds: () => invoke<string[]>("media_genre_seeds"),
   mediaClearPosters: () => invoke<number>("media_clear_posters"),
   mediaOpen: (id: string) => invoke<void>("media_open", { id }),
-
-  /** Client side filter over the discovered apps (used by the Search screen). */
-  searchApps: (query: string, limit = 24) => {
-    const text = query.trim().toLowerCase();
-    if (!text) return Promise.resolve([] as AppInfo[]);
-    const matches = appIndex.filter((app) => app.name.toLowerCase().includes(text));
-    return Promise.resolve(matches.slice(0, limit));
-  },
 };
-
-/** Name index used by `searchApps`; kept fresh by the store actions. */
-let appIndex: AppInfo[] = [];
-
-/** Give the search helper the current app list (avoids a store import cycle). */
-export function setAppIndex(apps: AppInfo[]): void {
-  appIndex = apps;
-}
 
 /** Fallback genre seeds (matches the IMDb catalogue's common genres). */
 const FALLBACK_GENRES = [

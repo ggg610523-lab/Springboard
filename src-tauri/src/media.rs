@@ -6,10 +6,14 @@
 //! `m.media-amazon.com` and cached on disk so shelves work offline afterwards.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use ts_rs::TS;
 
 /// Sent with every request: the endpoint rejects empty user agents.
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
@@ -38,7 +42,7 @@ pub const GENRE_SEEDS: &[(&str, &str)] = &[
 ];
 
 /// One title that can be recommended and shown as a poster.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MediaItem {
     /// IMDb id, e.g. `tt1375666`.
@@ -58,22 +62,24 @@ pub struct MediaItem {
 }
 
 /// Everything the engine learns from the user.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UserProfile {
     /// Learned affinity per genre (positive = liked, negative = disliked).
+    #[ts(type = "Record<string, number>")]
     pub genres: HashMap<String, f64>,
     pub liked: Vec<String>,
     pub disliked: Vec<String>,
     pub watched: Vec<String>,
     /// How often a poster was opened.
+    #[ts(type = "Record<string, number>")]
     pub clicks: HashMap<String, u64>,
     /// Recent search terms, most recent first.
     pub searches: Vec<String>,
     pub updated: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaStatus {
     /// Whether the last network call succeeded.
@@ -306,6 +312,12 @@ pub fn save_profile(profile: &UserProfile) {
     }
 }
 
+/// How many genre seeds are fetched at once. Each request shells out to `curl`
+/// with a 20 s timeout, so running all 17 seeds sequentially could stall the
+/// first sync for minutes; a small pool keeps one slow seed from blocking the
+/// rest without opening 17 connections.
+const CATALOG_WORKERS: usize = 6;
+
 /// Fetch every genre seed and merge into a ranked catalogue.
 /// `genres` restricts the seeds (None = all of them).
 pub fn build_catalog(genres: Option<&[String]>) -> Result<Vec<MediaItem>, String> {
@@ -318,26 +330,63 @@ pub fn build_catalog(genres: Option<&[String]>) -> Result<Vec<MediaItem>, String
         .map(|(label, query)| ((*label).to_string(), (*query).to_string()))
         .collect();
 
-    let mut items: Vec<MediaItem> = Vec::new();
-    let mut last_error: Option<String> = None;
-    for (label, query) in &seeds {
-        match search_imdb(query, label) {
-            Ok(mut list) => {
-                list.retain(|item| item.poster.is_some());
-                list.truncate(24);
-                for item in list {
-                    if !items.iter().any(|existing| existing.id == item.id) {
-                        items.push(item);
+    // Seeds are independent, so fan them out over scoped worker threads and
+    // pull from a shared index counter instead of handing out fixed chunks
+    // (a seed that times out must not stall a whole chunk).
+    let next = AtomicUsize::new(0);
+    let workers = CATALOG_WORKERS.min(seeds.len()).max(1);
+    let mut chunks: Vec<(Vec<MediaItem>, Option<String>)> = Vec::with_capacity(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let next = &next;
+            let seeds = &seeds;
+            handles.push(scope.spawn(move || {
+                let mut mine: Vec<MediaItem> = Vec::new();
+                let mut error: Option<String> = None;
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((label, query)) = seeds.get(index) else {
+                        break;
+                    };
+                    match search_imdb(query, label) {
+                        Ok(mut list) => {
+                            list.retain(|item| item.poster.is_some());
+                            list.truncate(24);
+                            mine.append(&mut list);
+                        }
+                        Err(err) => error = Some(err),
                     }
                 }
+                (mine, error)
+            }));
+        }
+        for handle in handles {
+            if let Ok(chunk) = handle.join() {
+                chunks.push(chunk);
             }
-            Err(err) => last_error = Some(err),
+        }
+    });
+
+    let mut items: Vec<MediaItem> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut last_error: Option<String> = None;
+    for (mut chunk, error) in chunks {
+        if error.is_some() {
+            last_error = error;
+        }
+        for item in chunk.drain(..) {
+            if seen.insert(item.id.clone()) {
+                items.push(item);
+            }
         }
     }
     if items.is_empty() {
         return Err(last_error.unwrap_or_else(|| "IMDb returned no usable titles".into()));
     }
-    items.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
+    // Rank first, id second: the workers merge in completion order, so the
+    // tie-breaker keeps the cached file byte-identical between runs.
+    items.sort_unstable_by(|a, b| a.rank.total_cmp(&b.rank).then_with(|| a.id.cmp(&b.id)));
     save_catalog(&items);
     Ok(items)
 }
@@ -368,16 +417,23 @@ pub fn recommendations(
     limit: usize,
     salt: f64,
 ) -> Vec<MediaItem> {
+    // The profile lists are scanned once per catalogue item, so build the
+    // membership sets up front instead of three linear scans per item.
+    let disliked: HashSet<&str> = profile.disliked.iter().map(String::as_str).collect();
+    let liked: HashSet<&str> = profile.liked.iter().map(String::as_str).collect();
+    let watched: HashSet<&str> = profile.watched.iter().map(String::as_str).collect();
+
     let mut scored: Vec<(f64, &MediaItem)> = catalog
         .iter()
-        .filter(|item| !profile.disliked.iter().any(|id| id == &item.id))
+        .filter(|item| !disliked.contains(item.id.as_str()))
         .map(|item| {
+            let id = item.id.as_str();
             let affinity = profile.genres.get(&item.genre).copied().unwrap_or(0.0);
             let mut score = 0.55 * popularity(item.rank) + 0.45 * (affinity / 3.0).tanh();
-            if profile.liked.iter().any(|id| id == &item.id) {
+            if liked.contains(id) {
                 score += 0.40;
             }
-            if profile.watched.iter().any(|id| id == &item.id) {
+            if watched.contains(id) {
                 score -= 0.15;
             }
             let clicks = profile.clicks.get(&item.id).copied().unwrap_or(0) as f64;
@@ -387,7 +443,7 @@ pub fn recommendations(
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
 
     let per_genre_cap = (limit / 3).max(2);
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -569,13 +625,76 @@ pub fn poster_file(id: &str) -> PathBuf {
     poster_dir().join(format!("{}.jpg", safe_id(id)))
 }
 
-/// The URL the webview should use for a proxy-cached cover image.
-pub fn poster_proxy_url(id: &str, remote: &str) -> String {
-    format!(
-        "poster://localhost/?id={}&u={}",
-        percent_encode(id),
-        percent_encode(remote)
-    )
+/// Bounded cache of decoded cover art, keyed by IMDb id (~48 × 40 kB).
+const POSTER_CACHE_LIMIT: usize = 48;
+
+#[derive(Default)]
+struct PosterCache {
+    entries: HashMap<String, Arc<Vec<u8>>>,
+    order: VecDeque<String>,
+}
+
+fn poster_cache() -> &'static Mutex<PosterCache> {
+    static CACHE: OnceLock<Mutex<PosterCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PosterCache::default()))
+}
+
+fn cache_get(id: &str) -> Option<Arc<Vec<u8>>> {
+    poster_cache().lock().ok()?.entries.get(id).cloned()
+}
+
+fn cache_insert(id: &str, arc: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
+    if let Ok(mut cache) = poster_cache().lock() {
+        if cache
+            .entries
+            .insert(id.to_string(), arc.clone())
+            .is_none()
+        {
+            cache.order.push_back(id.to_string());
+            while cache.order.len() > POSTER_CACHE_LIMIT {
+                if let Some(oldest) = cache.order.pop_front() {
+                    cache.entries.remove(&oldest);
+                }
+            }
+        }
+    }
+    arc
+}
+
+/// One in-flight fetch per id, so the hero, the shelf tile and the AOD poster
+/// wall asking for the same title only trigger a single network request.
+type Gate = Arc<(Mutex<bool>, Condvar)>;
+
+fn in_flight() -> &'static Mutex<HashMap<String, Gate>> {
+    static MAP: OnceLock<Mutex<HashMap<String, Gate>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn read_cached_file(file: &std::path::Path) -> Option<Arc<Vec<u8>>> {
+    if let Ok(bytes) = fs::read(file) {
+        if !bytes.is_empty() {
+            return Some(Arc::new(bytes));
+        }
+    }
+    None
+}
+
+/// Fetch a poster from IMDb and store it for offline use.
+fn fetch_poster(file: &std::path::Path, remote: Option<&str>) -> Option<Arc<Vec<u8>>> {
+    let remote = remote?;
+    if !poster_allowed(remote) {
+        return None;
+    }
+    let sized = thumb_url(remote, POSTER_WIDTH);
+    let bytes = http_get(&sized, 20).ok()?;
+    // Sanity check: JPEG/PNG magic and a plausible size.
+    let looks_like_image = bytes.len() > 512
+        && (bytes.starts_with(&[0xFF, 0xD8]) || bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]));
+    if !looks_like_image {
+        return None;
+    }
+    let _ = fs::write(file, &bytes);
+    Some(Arc::new(bytes))
 }
 
 fn query_param(uri: &str, key: &str) -> Option<String> {
@@ -595,32 +714,64 @@ fn query_param(uri: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Serve a cover image: from the disk cache when possible, otherwise fetch it
-/// from IMDb once and store it for offline use.
-pub fn poster_bytes(id: &str, remote: Option<&str>) -> Option<Vec<u8>> {
+/// Serve a cover image: from the memory/disk cache when possible, otherwise
+/// fetch it from IMDb once and store it for offline use.
+pub fn poster_bytes(id: &str, remote: Option<&str>) -> Option<Arc<Vec<u8>>> {
     if id.is_empty() {
         return None;
     }
     let file = poster_file(id);
-    if let Ok(bytes) = fs::read(&file) {
-        if !bytes.is_empty() {
-            return Some(bytes);
+    if let Some(hit) = cache_get(id) {
+        return Some(hit);
+    }
+    if let Some(bytes) = read_cached_file(&file) {
+        return Some(cache_insert(id, bytes));
+    }
+
+    // Only one thread fetches a given title; duplicates wait for the leader
+    // and are served from memory or from the file it just wrote.
+    let (gate, is_leader) = {
+        let mut map = in_flight().lock().ok()?;
+        match map.get(id) {
+            Some(gate) => (gate.clone(), false),
+            None => {
+                let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
+                map.insert(id.to_string(), gate.clone());
+                (gate, true)
+            }
+        }
+    };
+
+    if !is_leader {
+        let (lock, cvar) = &*gate;
+        if let Ok(mut done) = lock.lock() {
+            while !*done {
+                match cvar.wait_timeout(done, Duration::from_secs(25)) {
+                    Ok((guard, timeout)) => {
+                        done = guard;
+                        if timeout.timed_out() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        return cache_get(id).or_else(|| read_cached_file(&file).map(|bytes| cache_insert(id, bytes)));
+    }
+
+    let result = fetch_poster(&file, remote);
+    {
+        let (lock, cvar) = &*gate;
+        if let Ok(mut done) = lock.lock() {
+            *done = true;
+        }
+        cvar.notify_all();
+        if let Ok(mut map) = in_flight().lock() {
+            map.remove(id);
         }
     }
-    let remote = remote?;
-    if !poster_allowed(remote) {
-        return None;
-    }
-    let sized = thumb_url(remote, POSTER_WIDTH);
-    let bytes = http_get(&sized, 20).ok()?;
-    // Sanity check: JPEG/PNG magic and a plausible size.
-    let looks_like_image = bytes.len() > 512
-        && (bytes.starts_with(&[0xFF, 0xD8]) || bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]));
-    if !looks_like_image {
-        return None;
-    }
-    let _ = fs::write(&file, &bytes);
-    Some(bytes)
+    result.map(|bytes| cache_insert(id, bytes))
 }
 
 /// Response for `poster://localhost/?id=<tt>&u=<remote url>`.
@@ -645,23 +796,52 @@ pub fn poster_response(uri: &str) -> tauri::http::Response<Vec<u8>> {
         .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CACHE_CONTROL, "public, max-age=604800")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(bytes)
+        .body(bytes.as_ref().clone())
         .unwrap_or_else(|_| not_found())
 }
 
-/// (number of cached posters, total bytes on disk)
+/// Memoised cover-art statistics.
+fn cache_stats_memo() -> &'static Mutex<Option<(Instant, usize, u64)>> {
+    static MEMO: OnceLock<Mutex<Option<(Instant, usize, u64)>>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(None))
+}
+
+/// Number of cached posters and their total size on disk.
+///
+/// The Recommendations settings panel asks for this on every open, and a
+/// `read_dir` over a few hundred files is not free, so the answer is memoised
+/// for a couple of seconds (invalidation happens on `clear_posters`).
 pub fn cache_stats() -> (usize, u64) {
+    const TTL: Duration = Duration::from_secs(2);
+    if let Ok(memo) = cache_stats_memo().lock() {
+        if let Some((at, count, bytes)) = *memo {
+            if at.elapsed() < TTL {
+                return (count, bytes);
+            }
+        }
+    }
     let Ok(read) = fs::read_dir(poster_dir()) else {
         return (0, 0);
     };
-    read.flatten().fold((0usize, 0u64), |(count, bytes), item| {
+    let stats = read.flatten().fold((0usize, 0u64), |(count, bytes), item| {
         let size = item.metadata().map(|m| m.len()).unwrap_or(0);
         (count + 1, bytes + size)
-    })
+    });
+    if let Ok(mut memo) = cache_stats_memo().lock() {
+        *memo = Some((Instant::now(), stats.0, stats.1));
+    }
+    stats
 }
 
 /// Delete every cached cover image, returning how many were removed.
 pub fn clear_posters() -> usize {
+    if let Ok(mut memo) = cache_stats_memo().lock() {
+        *memo = None;
+    }
+    if let Ok(mut cache) = poster_cache().lock() {
+        cache.entries.clear();
+        cache.order.clear();
+    }
     let Ok(read) = fs::read_dir(poster_dir()) else {
         return 0;
     };

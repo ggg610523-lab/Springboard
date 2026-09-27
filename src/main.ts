@@ -2,8 +2,8 @@ import { api } from "./api";
 import { focusEngine } from "./focus/focus-engine";
 import { applyTheme } from "./palette";
 import { sound } from "./sound";
-import { actions, selectTab, store, type TabId } from "./state";
-import type { AppInfo, MediaItem } from "./types";
+import { actions, mediaById, selectTab, store, type TabId } from "./state";
+import type { AppTile, MediaItem } from "./types";
 import "./styles/index.css";
 import { el } from "./ui/icons";
 import { showDialog } from "./ui/dialog";
@@ -11,9 +11,12 @@ import { renderHero, setHeroForElement, startHeroRotation } from "./ui/hero";
 import { initGamepad } from "./gamepad";
 import { renderHints } from "./ui/hints";
 import { closeTopOverlay, hasOverlay } from "./ui/overlay";
-import { openSearch, isSearchOpen, handleSearchKey } from "./ui/search";
-import { openControlCentre } from "./ui/control-centre";
-import { openSettings } from "./ui/settings";
+import {
+  openControlCentreLazy,
+  openSearchLazy,
+  openSettingsLazy,
+  searchModuleSync,
+} from "./lazy";
 import { startSplash, hideSplash } from "./ui/splash";
 import { renderShelves } from "./ui/shelves";
 import { launchApp, openMedia, playOnPicker } from "./ui/tiles";
@@ -28,11 +31,36 @@ function refreshChrome(): void {
   renderShelves();
   renderHints();
   refreshAod();
-  focusEngine.rebuild("topbar");
+  // Keep whatever has focus (its key survives the re-render). Forcing focus
+  // back to the top bar here used to yank the remote away from the shelf the
+  // user was browsing whenever a background app scan finished.
+  focusEngine.rebuild();
+}
+
+/** Trailing debounce for the chrome repaint driven by settings changes. */
+let chromeTimer: number | null = null;
+
+/**
+ * Settings take effect immediately.
+ *
+ * The store had no subscribers, so a theme / accent / label change stayed
+ * invisible until the next tab switch. Tokens are pushed right away; the full
+ * repaint waits a tick so dragging a slider does not rebuild every shelf per
+ * input event.
+ */
+function wireSettingsLiveApply(): void {
+  store.onSettingsChange(() => {
+    applyTheme();
+    if (chromeTimer !== null) window.clearTimeout(chromeTimer);
+    chromeTimer = window.setTimeout(() => {
+      chromeTimer = null;
+      refreshChrome();
+    }, 140);
+  });
 }
 
 /** Details sheet for an app tile (I key). */
-function openAppInfo(app: AppInfo): void {
+function openAppInfo(app: AppTile): void {
   showDialog({
     title: app.name,
     body: "Launch this application?",
@@ -71,9 +99,8 @@ function infoForFocused(): void {
   }
   const mediaId = focused?.closest<HTMLElement>("[data-media-id]")?.dataset.mediaId;
   if (mediaId) {
-    const item = [...store.state.recommendations, ...store.state.catalog].find(
-      (entry) => entry.id === mediaId,
-    );
+    // One cached id → item map instead of merging two arrays per key press.
+    const item = mediaById().get(mediaId);
     if (item) openTitleInfo(item);
   }
 }
@@ -81,9 +108,9 @@ function infoForFocused(): void {
 /** Toggle the system mute state and mirror it into the store. */
 async function toggleMute(): Promise<void> {
   try {
-    await api.audioCommand("volume-mute");
-    const [volume, muted] = await api.getAudio();
-    store.set({ audio: { volume, muted } });
+    // `audio_command` returns the post-action mixer state, so no follow-up read.
+    const result = await api.audioCommand("volume-mute");
+    store.set({ audio: { volume: result.volume, muted: result.muted } });
   } catch {
     /* the backend toasts failures itself */
   }
@@ -94,15 +121,48 @@ function onKeydown(event: KeyboardEvent): void {
   const key = event.key;
 
   // While search is open, printable keys and Backspace type into the field
-  // instead of doing anything else.
-  if (hasOverlay() && isSearchOpen() && handleSearchKey(key)) {
+  // instead of doing anything else. The search chunk is loaded on first use,
+  // so consult it only if it has already been resolved.
+  const search = searchModuleSync();
+  if (hasOverlay() && search && search.isSearchOpen() && search.handleSearchKey(key)) {
     event.preventDefault();
     return;
+  }
+
+  // A real text field (the backdrop path prompt) owns the keyboard while it
+  // is focused: Backspace must delete a character instead of closing the
+  // sheet, and letter shortcuts ("m" mute, "s" Settings…) must not fire while
+  // the user is typing a path.
+  const active = document.activeElement;
+  const editable =
+    active instanceof HTMLInputElement ||
+    active instanceof HTMLTextAreaElement ||
+    (active instanceof HTMLElement && active.isContentEditable);
+  if (editable) {
+    if (key === "Enter") {
+      // Submit the sheet's primary action, the way a prompt should behave.
+      const sheet = active.closest<HTMLElement>(".overlay");
+      const primary = sheet?.querySelector<HTMLElement>(".btn--primary");
+      const handler = primary ? focusEngine.handlersFor(primary) : undefined;
+      if (primary && handler?.onActivate) {
+        handler.onActivate();
+        event.preventDefault();
+      }
+      return;
+    }
+    if (key === "Escape") {
+      if (hasOverlay()) closeTopOverlay();
+      event.preventDefault();
+      return;
+    }
+    if (key.length === 1 || key === "Backspace" || key === "Delete") return;
+    // Arrow keys fall through so the remote can move focus out of the field.
   }
 
   // Back / close always works, overlay or not.
   if (key === "Escape" || key === "Backspace") {
     if (hasOverlay()) closeTopOverlay();
+    else if (store.state.settings.escapeQuits) void actions.quit();
     else sound.back();
     event.preventDefault();
     return;
@@ -158,11 +218,11 @@ function onKeydown(event: KeyboardEvent): void {
       break;
     case "s":
     case "S":
-      openSettings();
+      openSettingsLazy();
       break;
     case "c":
     case "C":
-      openControlCentre();
+      openControlCentreLazy();
       break;
     default:
       return;
@@ -179,20 +239,21 @@ function wireEvents(): void {
   document.addEventListener("launcher:tab", (event) => {
     const id = (event as CustomEvent<TabId>).detail;
     if (id === "search") {
-      openSearch();
+      openSearchLazy();
       return;
     }
     if (id === "settings") {
-      openSettings();
+      openSettingsLazy();
       return;
     }
     selectTab(id);
     refreshChrome();
-    focusEngine.focusFirst("topbar");
+    // Stay on the tab that was just activated instead of jumping to "Home".
+    focusEngine.focusKey(`tab-${id}`);
   });
 
   // The brand hero offers a "Open Settings" pill.
-  document.addEventListener("launcher:open-settings", () => openSettings());
+  document.addEventListener("launcher:open-settings", () => openSettingsLazy());
 }
 
 async function boot(): Promise<void> {
@@ -202,6 +263,7 @@ async function boot(): Promise<void> {
   await Promise.all([actions.bootstrap(), splash]);
   hideSplash();
   wireEvents();
+  wireSettingsLiveApply();
   refreshChrome();
   focusEngine.focusFirst("topbar");
   startClock();
@@ -210,9 +272,10 @@ async function boot(): Promise<void> {
   initAod();
 
   await api
-    .onAppsScanned((apps) => {
-      store.set({ apps });
-      refreshChrome();
+    .onAppsScanned((payload) => {
+      // The event carries a revision only; stale notifications cost nothing.
+      if (payload.revision <= store.state.appsRevision) return;
+      void actions.refreshIfStale(payload.revision).then(() => refreshChrome());
     })
     .catch(() => undefined);
   await api
